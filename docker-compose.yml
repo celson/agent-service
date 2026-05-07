@@ -1,0 +1,99 @@
+services:
+
+  agent:
+    build: .
+    ports:
+      - "8080:8080"
+    environment:
+      PORT: "8080"
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+      OPENAI_API_KEY: ${OPENAI_API_KEY}           # para embeddings
+      BRAVE_API_KEY: ${BRAVE_API_KEY}             # para web search
+      GITHUB_TOKEN: ${GITHUB_TOKEN}               # opcional: ativa MCP GitHub
+      DATABASE_URL: postgres://agent:secret@postgres:5432/agentdb?sslmode=disable
+      REDIS_ADDR: redis:6379
+      FILES_BASE_DIR: /app/files
+      AGENT_MODEL: claude-sonnet-4-20250514
+      OTEL_EXPORTER_JAEGER_ENDPOINT: http://jaeger:14268/api/traces
+    volumes:
+      - agent-files:/app/files
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/v1/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: agent
+      POSTGRES_PASSWORD: secret
+      POSTGRES_DB: agentdb
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U agent -d agentdb"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    command: redis-server --save 60 1 --loglevel warning
+    volumes:
+      - redis-data:/data
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+  jaeger:
+    image: jaegertracing/all-in-one:1.57
+    ports:
+      - "16686:16686"   # UI
+      - "14268:14268"   # HTTP collector
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+    restart: unless-stopped
+
+  prometheus:
+    image: prom/prometheus:v2.51.0
+    volumes:
+      - ./infra/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    ports:
+      - "9090:9090"
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:10.4.0
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - grafana-data:/var/lib/grafana
+    ports:
+      - "3000:3000"
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+
+volumes:
+  postgres-data:
+  redis-data:
+  agent-files:
+  prometheus-data:
+  grafana-data:
