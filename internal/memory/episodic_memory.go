@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -56,7 +58,7 @@ func (e *EpisodicMemory) Record(ctx context.Context, ep Episode) error {
 		INSERT INTO episodes
 			(session_id, user_id, goal, outcome, summary, tools_used, duration_ms)
 		VALUES ($1, $2, $3, $4, $5, $6, $7)
-	`, ep.SessionID, ep.UserID, ep.Goal, ep.Outcome, ep.Summary, toolsJSON, ep.DurationMs)
+	`, ep.SessionID, ep.UserID, sanitizeUTF8(ep.Goal), ep.Outcome, sanitizeUTF8(ep.Summary), toolsJSON, ep.DurationMs)
 
 	if err != nil {
 		return fmt.Errorf("episodic_memory: record failed: %w", err)
@@ -151,6 +153,14 @@ func (e *EpisodicMemory) Stats(ctx context.Context) (map[string]any, error) {
 		"success_rate":     float64(success) / float64(total),
 		"avg_duration_ms":  avgDuration,
 	}, nil
+}
+
+// sanitizeUTF8 remove bytes inválidos para evitar erro 22021 no Postgres.
+func sanitizeUTF8(s string) string {
+	if utf8.ValidString(s) {
+		return s
+	}
+	return strings.ToValidUTF8(s, "")
 }
 
 // CreateSchema cria as tabelas e índices necessários.
