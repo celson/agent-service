@@ -16,6 +16,7 @@ import (
 	"github.com/joho/godotenv"
 	"github.com/redis/go-redis/v9"
 	"github.com/yourorg/agent-service/internal/agent"
+	"github.com/yourorg/agent-service/internal/config"
 	"github.com/yourorg/agent-service/internal/mcp"
 	"github.com/yourorg/agent-service/internal/memory"
 	"github.com/yourorg/agent-service/internal/openrouter"
@@ -111,55 +112,51 @@ func main() {
 		},
 	})
 
-	// ── MCP Servers opcionais ─────────────────────────────────────────────────
-	if os.Getenv("GITHUB_TOKEN") != "" {
-		mcpClient, err := mcp.New("npx", "-y", "@modelcontextprotocol/server-github")
-		if err != nil {
-			logger.Warn("github mcp server failed to start", "error", err)
-		} else {
+	// ── MCP Servers via .mcp.json ────────────────────────────────────────────
+	mcpCfg, err := config.LoadMCP(".mcp.json")
+	if err != nil {
+		logger.Warn("failed to load .mcp.json", "error", err)
+	} else {
+		for name, srv := range mcpCfg.Servers {
+			// Pula servers cujas env vars obrigatórias estão vazias
+			if hasEmptyRequiredEnv(srv.Env) {
+				logger.Info("mcp server skipped (missing env vars)", "server", name)
+				continue
+			}
+			mcpClient, err := mcp.NewWithEnv(srv.Env, srv.Command, srv.Args...)
+			if err != nil {
+				logger.Warn("mcp server failed to start", "server", name, "error", err)
+				continue
+			}
 			defer mcpClient.Close()
 			agentTools, err := mcpClient.AsAgentTools(ctx)
 			if err != nil {
-				logger.Warn("failed to load github mcp tools", "error", err)
-			} else {
-				for _, t := range agentTools {
-					registry.Register(t)
-				}
-				logger.Info("github mcp tools registered", "count", len(agentTools))
+				logger.Warn("failed to load mcp tools", "server", name, "error", err)
+				continue
 			}
+			for _, t := range agentTools {
+				registry.Register(t)
+			}
+			logger.Info("mcp tools registered", "server", name, "count", len(agentTools))
 		}
 	}
 
-	// ── MCP Grafana ───────────────────────────────────────────────────────────
-	if grafanaURL := os.Getenv("GRAFANA_URL"); grafanaURL != "" {
-		mcpGrafana, err := mcp.NewWithEnv(
-			map[string]string{
-				"GRAFANA_URL":                   grafanaURL,
-				"GRAFANA_SERVICE_ACCOUNT_TOKEN": os.Getenv("GRAFANA_SERVICE_ACCOUNT_TOKEN"),
-			},
-			"uvx", "mcp-grafana",
-		)
-		if err != nil {
-			logger.Warn("grafana mcp server failed to start", "error", err)
-		} else {
-			defer mcpGrafana.Close()
-			grafanaTools, err := mcpGrafana.AsAgentTools(ctx)
-			if err != nil {
-				logger.Warn("failed to load grafana mcp tools", "error", err)
-			} else {
-				for _, t := range grafanaTools {
-					registry.Register(t)
-				}
-				logger.Info("grafana mcp tools registered", "count", len(grafanaTools))
-			}
-		}
+	// ── Prompts e skills externos ─────────────────────────────────────────────
+	basePrompt := config.LoadPrompt("prompts/base.md", "")
+	srePrompt := config.LoadPrompt("prompts/sre.md", "")
+
+	troubleshootingSkill, err := config.LoadSkill("skills", "troubleshooting")
+	if err != nil {
+		logger.Warn("failed to load troubleshooting skill", "error", err)
+		troubleshootingSkill = ""
 	}
 
 	// ── Agente ────────────────────────────────────────────────────────────────
 	agentCfg := agent.Config{
-		Model:     envOrDefault("AGENT_MODEL", openrouter.DefaultChatModel),
-		MaxTokens: 4096,
-		MaxIter:   20,
+		Model:      envOrDefault("AGENT_MODEL", openrouter.DefaultChatModel),
+		MaxTokens:  4096,
+		MaxIter:    20,
+		BasePrompt: basePrompt,
 	}
 
 	a := agent.New(orClient, agentCfg, registry, contextMem, workingMem, vectorMem, episodicMem, logger)
@@ -199,6 +196,45 @@ func main() {
 		json.NewEncoder(w).Encode(map[string]any{
 			"session_id":  req.SessionID,
 			"output":      result.Output,
+			"iterations":  result.Iterations,
+			"tools_used":  result.ToolsUsed,
+			"duration_ms": result.DurationMs,
+		})
+	})
+
+	mux.HandleFunc("POST /v1/alert", func(w http.ResponseWriter, r *http.Request) {
+		var payload alertPayload
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			http.Error(w, "invalid request body", http.StatusBadRequest)
+			return
+		}
+		if len(payload.Alerts) == 0 {
+			http.Error(w, "no alerts in payload", http.StatusBadRequest)
+			return
+		}
+
+		alert := payload.Alerts[0]
+		sessionID := "sre-alert-" + alert.Fingerprint
+		goal := buildSREGoal(alert, troubleshootingSkill)
+
+		result, err := a.Run(r.Context(), sessionID, goal, agent.RunOptions{
+			SystemPrompt: srePrompt,
+		})
+		if err != nil {
+			if errors.Is(err, agent.ErrMaxIterationsReached) {
+				http.Error(w, err.Error(), http.StatusUnprocessableEntity)
+				return
+			}
+			logger.Error("sre agent run failed", "error", err, "session", sessionID)
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"session_id":  sessionID,
+			"alert":       alert.Labels["alertname"],
+			"rca":         result.Output,
 			"iterations":  result.Iterations,
 			"tools_used":  result.ToolsUsed,
 			"duration_ms": result.DurationMs,
@@ -245,6 +281,69 @@ func main() {
 		logger.Error("server error", "error", err)
 		os.Exit(1)
 	}
+}
+
+type alertPayload struct {
+	Alerts []alertItem `json:"alerts"`
+}
+
+type alertItem struct {
+	Status      string            `json:"status"`
+	Labels      map[string]string `json:"labels"`
+	Annotations map[string]string `json:"annotations"`
+	StartsAt    string            `json:"startsAt"`
+	EndsAt      string            `json:"endsAt"`
+	Fingerprint string            `json:"fingerprint"`
+}
+
+func buildSREGoal(a alertItem, skill string) string {
+	alertName := a.Labels["alertname"]
+	severity := a.Labels["severity"]
+	service := a.Labels["service"]
+	summary := a.Annotations["summary"]
+	description := a.Annotations["description"]
+	if description == "" {
+		description = summary
+	}
+
+	labels := ""
+	for k, v := range a.Labels {
+		if k != "alertname" && k != "severity" && k != "service" {
+			labels += fmt.Sprintf("  %s=%s\n", k, v)
+		}
+	}
+
+	header := fmt.Sprintf(`ALERTA SRE: %s | Severity: %s | Status: %s
+Serviço: %s | Início: %s
+Descrição: %s
+Labels adicionais:
+%s`,
+		alertName, severity, a.Status,
+		service, a.StartsAt,
+		description,
+		labels,
+	)
+
+	if skill != "" {
+		return header + "\n\n" + skill
+	}
+	return header + fmt.Sprintf(`
+
+Realize um Root Cause Analysis do serviço "%s":
+1. Colete métricas (latência, erros, saturação, tráfego) no período do incidente
+2. Busque logs de erro no Loki
+3. Identifique a causa raiz com 5 Whys
+4. Apresente: Root Cause | Impact | Timeline | Remediation Steps`, service)
+}
+
+// hasEmptyRequiredEnv retorna true se qualquer valor de env for vazio após expansão.
+func hasEmptyRequiredEnv(env map[string]string) bool {
+	for _, v := range env {
+		if v == "" {
+			return true
+		}
+	}
+	return false
 }
 
 func mustEnv(key string) string {

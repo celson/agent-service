@@ -22,9 +22,10 @@ var (
 )
 
 type Config struct {
-	Model     string
-	MaxTokens int
-	MaxIter   int
+	Model      string
+	MaxTokens  int
+	MaxIter    int
+	BasePrompt string
 }
 
 func DefaultConfig() Config {
@@ -72,7 +73,11 @@ type RunResult struct {
 	DurationMs int64
 }
 
-func (a *Agent) Run(ctx context.Context, sessionID, goal string) (*RunResult, error) {
+type RunOptions struct {
+	SystemPrompt string
+}
+
+func (a *Agent) Run(ctx context.Context, sessionID, goal string, opts ...RunOptions) (*RunResult, error) {
 	ctx, span := a.tracer.Start(ctx, "agent.run",
 		trace.WithAttributes(
 			attribute.String("session_id", sessionID),
@@ -87,10 +92,16 @@ func (a *Agent) Run(ctx context.Context, sessionID, goal string) (*RunResult, er
 
 	start := time.Now()
 
-	systemPrompt, err := a.buildSystemPrompt(ctx, goal)
-	if err != nil {
-		a.logger.Warn("failed to build system prompt from memory", "error", err)
-		systemPrompt = baseSystemPrompt
+	var systemPrompt string
+	if len(opts) > 0 && opts[0].SystemPrompt != "" {
+		systemPrompt = opts[0].SystemPrompt
+	} else {
+		var err error
+		systemPrompt, err = a.buildSystemPrompt(ctx, goal)
+		if err != nil {
+			a.logger.Warn("failed to build system prompt from memory", "error", err)
+			systemPrompt = a.basePrompt()
+		}
 	}
 
 	state, err := a.workingMem.Load(ctx, sessionID)
@@ -204,13 +215,20 @@ func (a *Agent) executeTools(
 	return results
 }
 
+func (a *Agent) basePrompt() string {
+	if a.cfg.BasePrompt != "" {
+		return a.cfg.BasePrompt
+	}
+	return baseSystemPrompt
+}
+
 func (a *Agent) buildSystemPrompt(ctx context.Context, goal string) (string, error) {
 	memories, err := a.vectorMem.Search(ctx, goal, 5)
 	if err != nil {
-		return baseSystemPrompt, err
+		return a.basePrompt(), err
 	}
 	past, _ := a.episodicMem.FindSimilar(ctx, goal, 3)
-	return buildPromptWithContext(memories, past), nil
+	return buildPromptWithContext(a.basePrompt(), memories, past), nil
 }
 
 func (a *Agent) persistEpisode(ctx context.Context, sessionID, goal string, result *RunResult) {
@@ -262,8 +280,8 @@ const baseSystemPrompt = `Você é um agente de IA útil e preciso.
 Você tem acesso a ferramentas para executar código e interagir com sistemas externos.
 Sempre planeje antes de agir. Ao concluir uma tarefa, apresente o resultado de forma clara e objetiva.`
 
-func buildPromptWithContext(memories []string, past []memory.Episode) string {
-	prompt := baseSystemPrompt
+func buildPromptWithContext(base string, memories []string, past []memory.Episode) string {
+	prompt := base
 	if len(memories) > 0 {
 		prompt += "\n\n[Conhecimento relevante recuperado da memória]\n"
 		for _, m := range memories {
