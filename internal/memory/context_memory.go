@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/yourorg/agent-service/internal/openrouter"
+	"github.com/yourorg/agent-service/internal/bedrock"
 )
 
 const (
@@ -16,7 +16,7 @@ const (
 // ContextMemory gerencia a janela de tokens ativa da conversa.
 type ContextMemory struct {
 	system    string
-	messages  []openrouter.Message
+	messages  []bedrock.Message
 	maxTokens int
 }
 
@@ -27,32 +27,33 @@ func NewContextMemory(maxTokens int) *ContextMemory {
 	return &ContextMemory{maxTokens: maxTokens}
 }
 
-func (c *ContextMemory) Reset()              { c.messages = nil }
-func (c *ContextMemory) SetSystem(p string)  { c.system = p }
-func (c *ContextMemory) System() string      { return c.system }
-func (c *ContextMemory) Messages() []openrouter.Message {
-	// Injeta system como primeira mensagem (formato OpenAI)
-	msgs := make([]openrouter.Message, 0, len(c.messages)+1)
+func (c *ContextMemory) Reset()             { c.messages = nil }
+func (c *ContextMemory) SetSystem(p string) { c.system = p }
+func (c *ContextMemory) System() string     { return c.system }
+func (c *ContextMemory) Messages() []bedrock.Message {
+	// Injeta system como primeira mensagem (formato OpenAI-like). O cliente
+	// bedrock extrai esse role:"system" para o campo top-level do body.
+	msgs := make([]bedrock.Message, 0, len(c.messages)+1)
 	if c.system != "" {
-		msgs = append(msgs, openrouter.Message{Role: "system", Content: c.system})
+		msgs = append(msgs, bedrock.Message{Role: "system", Content: c.system})
 	}
 	return append(msgs, c.messages...)
 }
 
 func (c *ContextMemory) Add(role, content string) {
-	c.messages = append(c.messages, openrouter.Message{Role: role, Content: content})
+	c.messages = append(c.messages, bedrock.Message{Role: role, Content: content})
 }
 
-func (c *ContextMemory) AddAssistantMessage(msg openrouter.Message) {
+func (c *ContextMemory) AddAssistantMessage(msg bedrock.Message) {
 	c.messages = append(c.messages, msg)
 }
 
-func (c *ContextMemory) AddToolResults(results []openrouter.Message) {
+func (c *ContextMemory) AddToolResults(results []bedrock.Message) {
 	c.messages = append(c.messages, results...)
 }
 
 // CompactIfNeeded sumariza o histórico quando a janela estiver quase cheia.
-func (c *ContextMemory) CompactIfNeeded(ctx context.Context, or *openrouter.Client) error {
+func (c *ContextMemory) CompactIfNeeded(ctx context.Context, llm *bedrock.Client) error {
 	estimated := c.estimateTokens()
 	if estimated < int(float64(c.maxTokens)*compactionThreshold) {
 		return nil
@@ -66,10 +67,10 @@ func (c *ContextMemory) CompactIfNeeded(ctx context.Context, or *openrouter.Clie
 	toSummarize := c.messages[:len(c.messages)-preserveN]
 	recent := c.messages[len(c.messages)-preserveN:]
 
-	resp, err := or.Chat(ctx, openrouter.ChatRequest{
-		Model:     "anthropic/claude-haiku-4-5", // modelo leve para sumarizar
+	resp, err := llm.Chat(ctx, bedrock.ChatRequest{
+		Model:     bedrock.DefaultHaikuModel, // modelo leve para sumarizar
 		MaxTokens: 1024,
-		Messages: []openrouter.Message{
+		Messages: []bedrock.Message{
 			{Role: "system", Content: "Resuma a conversa de forma concisa, preservando decisões e resultados importantes."},
 			{Role: "user", Content: formatForSummary(toSummarize)},
 		},
@@ -83,7 +84,7 @@ func (c *ContextMemory) CompactIfNeeded(ctx context.Context, or *openrouter.Clie
 
 	summary := extractContentString(resp.Choices[0].Message)
 
-	c.messages = []openrouter.Message{
+	c.messages = []bedrock.Message{
 		{Role: "user", Content: "[Resumo da conversa anterior]\n" + summary},
 		{Role: "assistant", Content: "Entendido. Continuo a partir deste contexto."},
 	}
@@ -97,7 +98,7 @@ func (c *ContextMemory) estimateTokens() int {
 		switch v := msg.Content.(type) {
 		case string:
 			total += len(v) / 4
-		case []openrouter.ContentPart:
+		case []bedrock.ContentPart:
 			for _, p := range v {
 				total += len(p.Text) / 4
 			}
@@ -106,7 +107,7 @@ func (c *ContextMemory) estimateTokens() int {
 	return total
 }
 
-func formatForSummary(messages []openrouter.Message) string {
+func formatForSummary(messages []bedrock.Message) string {
 	var sb strings.Builder
 	for _, msg := range messages {
 		sb.WriteString(msg.Role + ": ")
@@ -116,7 +117,7 @@ func formatForSummary(messages []openrouter.Message) string {
 	return sb.String()
 }
 
-func extractContentString(msg openrouter.Message) string {
+func extractContentString(msg bedrock.Message) string {
 	switch v := msg.Content.(type) {
 	case string:
 		return v

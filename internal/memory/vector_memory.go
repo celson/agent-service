@@ -8,7 +8,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/pgvector/pgvector-go"
-	"github.com/yourorg/agent-service/internal/openrouter"
+	"github.com/yourorg/agent-service/internal/bedrock"
 )
 
 const (
@@ -19,15 +19,15 @@ const (
 // VectorMemory persiste e busca memórias por similaridade semântica via pgvector.
 type VectorMemory struct {
 	db         *pgxpool.Pool
-	or         *openrouter.Client
+	llm        *bedrock.Client
 	embedModel string
 }
 
-func NewVectorMemory(db *pgxpool.Pool, or *openrouter.Client, embedModel string) *VectorMemory {
+func NewVectorMemory(db *pgxpool.Pool, llm *bedrock.Client, embedModel string) *VectorMemory {
 	if embedModel == "" {
-		embedModel = openrouter.DefaultEmbedModel
+		embedModel = bedrock.DefaultEmbedModel
 	}
-	return &VectorMemory{db: db, or: or, embedModel: embedModel}
+	return &VectorMemory{db: db, llm: llm, embedModel: embedModel}
 }
 
 type MemoryEntry struct {
@@ -42,7 +42,7 @@ func (v *VectorMemory) Store(ctx context.Context, content string, metadata map[s
 	if content == "" {
 		return nil
 	}
-	embedding, err := v.or.EmbedOne(ctx, v.embedModel, content)
+	embedding, err := v.llm.EmbedOne(ctx, v.embedModel, content)
 	if err != nil {
 		return fmt.Errorf("vector_memory: embed failed: %w", err)
 	}
@@ -58,7 +58,7 @@ func (v *VectorMemory) Search(ctx context.Context, query string, topK int) ([]st
 	if topK == 0 {
 		topK = defaultTopK
 	}
-	queryEmb, err := v.or.EmbedOne(ctx, v.embedModel, query)
+	queryEmb, err := v.llm.EmbedOne(ctx, v.embedModel, query)
 	if err != nil {
 		return nil, fmt.Errorf("vector_memory: embed query failed: %w", err)
 	}
@@ -86,13 +86,18 @@ func (v *VectorMemory) Search(ctx context.Context, query string, topK int) ([]st
 	return results, rows.Err()
 }
 
+// CreateSchema (re)cria a tabela de memórias vetoriais. A dimensão mudou de
+// 1536 (OpenAI text-embedding-3-small) para 1024 (Amazon Titan embed v2),
+// então dropamos a tabela antiga — vetores anteriores não são compatíveis.
+// EpisodicMemory preserva o histórico de runs.
 func (v *VectorMemory) CreateSchema(ctx context.Context) error {
 	_, err := v.db.Exec(ctx, `
 		CREATE EXTENSION IF NOT EXISTS vector;
-		CREATE TABLE IF NOT EXISTS memories (
+		DROP TABLE IF EXISTS memories;
+		CREATE TABLE memories (
 			id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
 			content    TEXT NOT NULL,
-			embedding  VECTOR(1536),
+			embedding  VECTOR(1024),
 			metadata   JSONB DEFAULT '{}',
 			created_at TIMESTAMPTZ DEFAULT NOW()
 		);

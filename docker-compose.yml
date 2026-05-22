@@ -6,17 +6,29 @@ services:
       - "8080:8080"
     environment:
       PORT: "8080"
-      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
-      OPENAI_API_KEY: ${OPENAI_API_KEY}           # para embeddings
+      # AWS Bedrock — usa default credentials chain. Em ordem:
+      # 1) Variáveis AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY/AWS_SESSION_TOKEN
+      # 2) ~/.aws/config (sessões SSO criadas por `aws sso login`)
+      # 3) ~/.aws/credentials
+      # 4) IAM role (em EC2/ECS/EKS via IRSA)
+      AWS_REGION: ${AWS_REGION:-us-east-1}
+      AWS_PROFILE: ${AWS_PROFILE:-default}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
+      AWS_SESSION_TOKEN: ${AWS_SESSION_TOKEN:-}
+      BEDROCK_MODEL: ${BEDROCK_MODEL:-us.anthropic.claude-sonnet-4-6}
+      BEDROCK_EMBED_MODEL: ${BEDROCK_EMBED_MODEL:-amazon.titan-embed-text-v2:0}
       BRAVE_API_KEY: ${BRAVE_API_KEY}             # para web search
       GITHUB_TOKEN: ${GITHUB_TOKEN}               # opcional: ativa MCP GitHub
       DATABASE_URL: postgres://agent:secret@postgres:5432/agentdb?sslmode=disable
       REDIS_ADDR: redis:6379
       FILES_BASE_DIR: /app/files
-      AGENT_MODEL: claude-sonnet-4-20250514
       OTEL_EXPORTER_JAEGER_ENDPOINT: http://jaeger:14268/api/traces
     volumes:
       - agent-files:/app/files
+      # Monta ~/.aws read-only para o SDK encontrar credenciais e a cache do SSO.
+      # Rode `aws sso login` (ou `aws configure`) no host antes de subir o stack.
+      - ${HOME}/.aws:/root/.aws:ro
     depends_on:
       postgres:
         condition: service_healthy
