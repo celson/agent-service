@@ -92,6 +92,86 @@ func (a *Agent) Run(ctx context.Context, sessionID, goal string, opts ...RunOpti
 
 	start := time.Now()
 
+	state := a.initializeContext(ctx, sessionID, goal, opts)
+
+	result, toolsUsed, err := a.runLoop(ctx, sessionID, state, span)
+	if err != nil {
+		return nil, err
+	}
+
+	for t := range toolsUsed {
+		result.ToolsUsed = append(result.ToolsUsed, t)
+	}
+	result.DurationMs = time.Since(start).Milliseconds()
+
+	go a.persistEpisode(context.Background(), sessionID, goal, result)
+	return result, nil
+}
+
+func (a *Agent) runLoop(
+	ctx context.Context,
+	sessionID string,
+	state *memory.AgentState,
+	span trace.Span,
+) (*RunResult, map[string]struct{}, error) {
+	result := &RunResult{}
+	toolsUsed := map[string]struct{}{}
+
+	for i := 0; i < a.cfg.MaxIter; i++ {
+		result.Iterations = i + 1
+
+		if err := a.contextMem.CompactIfNeeded(ctx, a.llm); err != nil {
+			a.logger.Warn("context compaction failed", "error", err)
+		}
+
+		req := bedrock.ChatRequest{
+			Model:     a.cfg.Model,
+			MaxTokens: a.cfg.MaxTokens,
+			Messages:  a.contextMem.Messages(),
+			Tools:     a.registry.Definitions(),
+		}
+
+		resp, err := a.llm.Chat(ctx, req)
+		if err != nil {
+			span.RecordError(err)
+			return nil, nil, fmt.Errorf("agent llm call failed: %w", err)
+		}
+		if len(resp.Choices) == 0 {
+			return nil, nil, fmt.Errorf("agent: empty response from model")
+		}
+
+		choice := resp.Choices[0]
+		a.logger.Debug("agent step",
+			"iteration", i+1,
+			"finish_reason", choice.FinishReason,
+			"total_tokens", resp.Usage.TotalTokens,
+		)
+
+		a.contextMem.AddAssistantMessage(choice.Message)
+
+		if choice.FinishReason == "end_turn" || choice.FinishReason == "stop" {
+			result.Output = extractText(choice.Message)
+			break
+		}
+
+		if choice.FinishReason == "tool_calls" || len(choice.Message.ToolCalls) > 0 {
+			toolResults := a.executeTools(ctx, sessionID, choice.Message.ToolCalls, state, toolsUsed)
+			a.contextMem.AddToolResults(toolResults)
+			continue
+		}
+
+		result.Output = extractText(choice.Message)
+		break
+	}
+
+	if result.Output == "" {
+		return nil, nil, ErrMaxIterationsReached
+	}
+
+	return result, toolsUsed, nil
+}
+
+func (a *Agent) initializeContext(ctx context.Context, sessionID, goal string, opts []RunOptions) *memory.AgentState {
 	var systemPrompt string
 	if len(opts) > 0 && opts[0].SystemPrompt != "" {
 		systemPrompt = opts[0].SystemPrompt
@@ -121,67 +201,7 @@ func (a *Agent) Run(ctx context.Context, sessionID, goal string, opts ...RunOpti
 		a.contextMem.Add("user", goal)
 	}
 
-	result := &RunResult{}
-	toolsUsed := map[string]struct{}{}
-
-	for i := 0; i < a.cfg.MaxIter; i++ {
-		result.Iterations = i + 1
-
-		if err := a.contextMem.CompactIfNeeded(ctx, a.llm); err != nil {
-			a.logger.Warn("context compaction failed", "error", err)
-		}
-
-		req := bedrock.ChatRequest{
-			Model:     a.cfg.Model,
-			MaxTokens: a.cfg.MaxTokens,
-			Messages:  a.contextMem.Messages(),
-			Tools:     a.registry.Definitions(),
-		}
-
-		resp, err := a.llm.Chat(ctx, req)
-		if err != nil {
-			span.RecordError(err)
-			return nil, fmt.Errorf("agent llm call failed: %w", err)
-		}
-		if len(resp.Choices) == 0 {
-			return nil, fmt.Errorf("agent: empty response from model")
-		}
-
-		choice := resp.Choices[0]
-		a.logger.Debug("agent step",
-			"iteration", i+1,
-			"finish_reason", choice.FinishReason,
-			"total_tokens", resp.Usage.TotalTokens,
-		)
-
-		a.contextMem.AddAssistantMessage(choice.Message)
-
-		if choice.FinishReason == "end_turn" || choice.FinishReason == "stop" {
-			result.Output = extractText(choice.Message)
-			break
-		}
-
-		if choice.FinishReason == "tool_calls" || len(choice.Message.ToolCalls) > 0 {
-			toolResults := a.executeTools(ctx, sessionID, choice.Message.ToolCalls, state, toolsUsed)
-			a.contextMem.AddToolResults(toolResults)
-			continue
-		}
-
-		result.Output = extractText(choice.Message)
-		break
-	}
-
-	if result.Output == "" {
-		return nil, ErrMaxIterationsReached
-	}
-
-	for t := range toolsUsed {
-		result.ToolsUsed = append(result.ToolsUsed, t)
-	}
-	result.DurationMs = time.Since(start).Milliseconds()
-
-	go a.persistEpisode(context.Background(), sessionID, goal, result)
-	return result, nil
+	return state
 }
 
 func (a *Agent) executeTools(
