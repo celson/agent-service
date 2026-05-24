@@ -26,7 +26,9 @@ go test ./internal/agent/...
 
 ## Architecture
 
-Go AI agent service that uses **OpenRouter** as its sole LLM backend (chat + embeddings). Uses the OpenAI-compatible HTTP API directly — no Anthropic SDK.
+Go AI agent service that uses **AWS Bedrock** as its sole LLM backend (chat + embeddings). Authentication uses the AWS SDK Go v2 default credentials chain — works with `aws sso login`, `~/.aws/credentials`, env vars, or IAM roles. No proprietary API keys.
+
+The package `internal/bedrock/` exposes an OpenAI-style API surface (`Message`, `ChatRequest`, `ToolCall`, etc.) and internally translates to/from the Anthropic-on-Bedrock JSON format. This keeps the agent loop, memory, and tool registry independent of provider quirks.
 
 ### Request flow
 
@@ -34,7 +36,7 @@ Go AI agent service that uses **OpenRouter** as its sole LLM backend (chat + emb
 
 ### Agent reasoning loop (`internal/agent/agent.go`)
 
-Iterates up to `MaxIter` (default 20) times: sends messages + tool definitions to OpenRouter, receives `tool_calls` or a final `stop`, dispatches tool calls through the registry, checkpoints progress in WorkingMemory, compacts context when needed. Returns on `finish_reason == "stop"` or `ErrMaxIterationsReached`.
+Iterates up to `MaxIter` (default 20) times: sends messages + tool definitions to Bedrock (`InvokeModel` with Anthropic body), receives `tool_calls` or a final `stop`, dispatches tool calls through the registry, checkpoints progress in WorkingMemory, compacts context when needed. Returns on `finish_reason == "stop"` or `ErrMaxIterationsReached`.
 
 ### Memory system (`internal/memory/`)
 
@@ -44,7 +46,7 @@ Four independent layers composed in the agent:
 |------|--------------|---------|
 | `ContextMemory` | in-process slice | Active message window; auto-compacts at 80% of `maxTokens` (default 180k) using claude-haiku as summarizer |
 | `WorkingMemory` | Redis | Session state (`AgentState`) — goal, plan, completed steps, variables; enables resumption after crash |
-| `VectorMemory` | Postgres + pgvector | Semantic recall via cosine similarity (HNSW index, threshold 0.75, topK 5); embeddings via OpenRouter |
+| `VectorMemory` | Postgres + pgvector | Semantic recall via cosine similarity (HNSW index, threshold 0.75, topK 5); embeddings via Bedrock Titan v2 (1024 dims) |
 | `EpisodicMemory` | Postgres | Full run history with FTS on goals; used to build system prompt from past relevant runs |
 
 ### MCP client (`internal/mcp/client.go`)
@@ -59,15 +61,18 @@ Spawns an external MCP server as a subprocess, communicates over stdio using JSO
 
 | Variable | Default | Notes |
 |----------|---------|-------|
-| `OPENROUTER_API_KEY` | — | Required |
-| `AGENT_MODEL` | `anthropic/claude-sonnet-4-6` | Chat model |
-| `EMBED_MODEL` | `openai/text-embedding-3-small` | Embedding model |
+| `AWS_REGION` | `us-east-1` | Bedrock region |
+| `AWS_PROFILE` | `default` | AWS CLI profile for credentials chain |
+| `BEDROCK_MODEL` | `us.anthropic.claude-sonnet-4-6` | Chat model (cross-region inference profile) |
+| `BEDROCK_EMBED_MODEL` | `amazon.titan-embed-text-v2:0` | Embedding model (1024 dims) |
 | `DATABASE_URL` | `postgres://agent:secret@localhost:5432/agentdb` | Postgres with pgvector |
 | `REDIS_ADDR` | `localhost:6379` | WorkingMemory backing store |
 | `FILES_BASE_DIR` | `./files` | Sandbox for file_ops tool |
 | `PORT` | `8080` | HTTP listen port |
 | `GITHUB_TOKEN` | — | Optional; enables MCP GitHub tools |
 | `OTEL_EXPORTER_JAEGER_ENDPOINT` | — | OpenTelemetry traces to Jaeger |
+
+Before running, ensure AWS credentials are available: `aws sso login` (recommended) or `aws configure`. The SDK reads from env vars, `~/.aws/config` (SSO sessions), `~/.aws/credentials`, or container/IMDS roles in that order.
 
 ## Observability
 

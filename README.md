@@ -1,18 +1,21 @@
 # Agent Service
 
-Agente de IA em Go usando **OpenRouter** como backend único para chat e embeddings.
-Sem dependência do SDK da Anthropic — usa HTTP direto com a API compatível com OpenAI.
+Agente de IA em Go usando **AWS Bedrock** como backend único para chat e embeddings.
+Autenticação via *default credentials chain* do AWS SDK — funciona com `aws sso login`,
+`~/.aws/credentials`, env vars, ou IAM roles em produção. Sem API keys próprias.
 
 ## Modelo padrão
 
-`anthropic/claude-sonnet-4-6` via OpenRouter.
+- **Chat:** `us.anthropic.claude-sonnet-4-6` (cross-region inference profile US)
+- **Compactação de contexto:** `us.anthropic.claude-haiku-4-5`
+- **Embeddings:** `amazon.titan-embed-text-v2:0` (1024 dims)
 
 ## Arquitetura
 
 ```
 cmd/server/main.go              — Entry point HTTP + wiring
 internal/
-  openrouter/client.go          — Cliente HTTP (chat + embeddings)
+  bedrock/                      — Cliente AWS Bedrock (chat + embeddings)
   agent/agent.go                — Loop raciocínio → ação → observação
   config/
     mcp.go                      — Loader de .mcp.json e prompts externos
@@ -20,7 +23,7 @@ internal/
   memory/
     context_memory.go           — Janela de tokens ativa (compactação automática)
     working_memory.go           — Estado de sessão no Redis
-    vector_memory.go            — Memória semântica via pgvector + OpenRouter embeddings
+    vector_memory.go            — Memória semântica via pgvector + Titan v2 embeddings
     episodic_memory.go          — Histórico de runs no Postgres
   tools/
     registry.go                 — Registro de ferramentas
@@ -38,9 +41,10 @@ skills/
 ## Setup rápido
 
 ```bash
-# 1. Copiar variáveis de ambiente
-cp .env.example .env
-# Preencher OPENROUTER_API_KEY e demais chaves
+# 1. Logar no AWS CLI (SSO ou credenciais estáticas)
+aws sso login            # ou: aws configure
+export AWS_REGION=us-east-1
+# (opcional) export AWS_PROFILE=meu-profile
 
 # 2. Subir infraestrutura
 docker-compose up -d postgres redis
@@ -49,8 +53,25 @@ docker-compose up -d postgres redis
 go run ./cmd/server
 
 # 4. Ou subir tudo com Docker
+# (o compose monta ~/.aws como volume read-only no container)
 docker-compose up --build
 ```
+
+### Variáveis de ambiente
+
+| Variável | Default | Descrição |
+|----------|---------|-----------|
+| `AWS_REGION` | `us-east-1` | Região AWS para Bedrock |
+| `AWS_PROFILE` | `default` | Profile do `~/.aws/config` |
+| `BEDROCK_MODEL` | `us.anthropic.claude-sonnet-4-6` | Modelo de chat |
+| `BEDROCK_EMBED_MODEL` | `amazon.titan-embed-text-v2:0` | Modelo de embedding |
+| `DATABASE_URL` | — | Postgres com pgvector |
+| `REDIS_ADDR` | `localhost:6379` | Working memory |
+| `FILES_BASE_DIR` | `./files` | Sandbox para `file_ops` |
+| `PORT` | `8080` | Porta HTTP |
+| `GITHUB_TOKEN` | — | Opcional; ativa MCP GitHub |
+
+> **Credenciais:** o SDK Go v2 resolve nesta ordem: env vars (`AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`/`AWS_SESSION_TOKEN`) → sessão SSO (`~/.aws/sso/cache/`, populada por `aws sso login`) → `~/.aws/credentials` → assume-role → IMDS/IRSA.
 
 ## Endpoints
 
@@ -211,7 +232,7 @@ flowchart TD
 
     subgraph AgentLoop["Agent Loop (até 20 iterações)"]
         AL1["1. Monta mensagens\n+ tool definitions"]
-        AL2["2. Chama OpenRouter\nclaude-sonnet-4-6"]
+        AL2["2. Chama AWS Bedrock\nclaude-sonnet-4-6"]
         AL3{"finish_reason?"}
         AL4["Executa tools\nvia Registry"]
         AL5["Checkpoint\nWorkingMemory"]
@@ -237,7 +258,7 @@ flowchart TD
     end
 
     subgraph External["Serviços externos"]
-        OR["OpenRouter API\nchat + embeddings"]
+        OR["AWS Bedrock\nchat + embeddings\n(Titan v2 / Claude Sonnet)"]
         GR["Grafana :3000"]
         RD["Redis :6379"]
         PG["Postgres + pgvector :5432"]
@@ -275,7 +296,7 @@ sequenceDiagram
     participant SK as Skills Loader
     participant AG as Agent Loop
     participant GR as Grafana MCP
-    participant OR as OpenRouter
+    participant OR as AWS Bedrock
 
     AM->>API: {alerts: [{alertname, service, severity, startsAt}]}
     API->>SK: LoadSkill("troubleshooting")\n→ resolve uses: collect-metrics

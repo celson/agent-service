@@ -5,13 +5,13 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/yourorg/agent-service/internal/openrouter"
+	"github.com/yourorg/agent-service/internal/bedrock"
 )
 
 type Handler func(ctx context.Context, input json.RawMessage) (string, error)
 
 type Tool struct {
-	Definition openrouter.Tool
+	Definition bedrock.Tool
 	Handler    Handler
 }
 
@@ -27,8 +27,8 @@ func (r *Registry) Register(t *Tool) {
 	r.tools[t.Definition.Function.Name] = t
 }
 
-func (r *Registry) Definitions() []openrouter.Tool {
-	defs := make([]openrouter.Tool, 0, len(r.tools))
+func (r *Registry) Definitions() []bedrock.Tool {
+	defs := make([]bedrock.Tool, 0, len(r.tools))
 	for _, t := range r.tools {
 		defs = append(defs, t.Definition)
 	}

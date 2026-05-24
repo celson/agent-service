@@ -11,16 +11,16 @@ import (
 	"strings"
 	"time"
 
-	"github.com/yourorg/agent-service/internal/openrouter"
+	"github.com/yourorg/agent-service/internal/bedrock"
 )
 
 // ── Code Runner ───────────────────────────────────────────────────────────────
 
 func NewCodeRunnerTool() *Tool {
 	return &Tool{
-		Definition: openrouter.Tool{
+		Definition: bedrock.Tool{
 			Type: "function",
-			Function: openrouter.ToolFunction{
+			Function: bedrock.ToolFunction{
 				Name:        "run_code",
 				Description: "Executa código em sandbox isolado. Suporta Python e Go.",
 				Parameters: map[string]any{
@@ -121,9 +121,9 @@ func runGo(ctx context.Context, code string) (string, error) {
 
 func NewFileOpsTool(baseDir string) *Tool {
 	return &Tool{
-		Definition: openrouter.Tool{
+		Definition: bedrock.Tool{
 			Type: "function",
-			Function: openrouter.ToolFunction{
+			Function: bedrock.ToolFunction{
 				Name:        "file_ops",
 				Description: "Lê, escreve e lista arquivos em um diretório base",
 				Parameters: map[string]any{

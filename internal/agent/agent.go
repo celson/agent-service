@@ -8,8 +8,8 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/yourorg/agent-service/internal/bedrock"
 	"github.com/yourorg/agent-service/internal/memory"
-	"github.com/yourorg/agent-service/internal/openrouter"
 	"github.com/yourorg/agent-service/internal/tools"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -30,14 +30,14 @@ type Config struct {
 
 func DefaultConfig() Config {
 	return Config{
-		Model:     openrouter.DefaultChatModel,
+		Model:     bedrock.DefaultChatModel,
 		MaxTokens: 4096,
 		MaxIter:   20,
 	}
 }
 
 type Agent struct {
-	or          *openrouter.Client
+	llm         *bedrock.Client
 	cfg         Config
 	registry    *tools.Registry
 	contextMem  *memory.ContextMemory
@@ -49,7 +49,7 @@ type Agent struct {
 }
 
 func New(
-	or *openrouter.Client,
+	llm *bedrock.Client,
 	cfg Config,
 	registry *tools.Registry,
 	contextMem *memory.ContextMemory,
@@ -59,7 +59,7 @@ func New(
 	logger *slog.Logger,
 ) *Agent {
 	return &Agent{
-		or: or, cfg: cfg, registry: registry,
+		llm: llm, cfg: cfg, registry: registry,
 		contextMem: contextMem, workingMem: workingMem,
 		vectorMem: vectorMem, episodicMem: episodicMem,
 		tracer: otel.Tracer("agent"), logger: logger,
@@ -127,18 +127,18 @@ func (a *Agent) Run(ctx context.Context, sessionID, goal string, opts ...RunOpti
 	for i := 0; i < a.cfg.MaxIter; i++ {
 		result.Iterations = i + 1
 
-		if err := a.contextMem.CompactIfNeeded(ctx, a.or); err != nil {
+		if err := a.contextMem.CompactIfNeeded(ctx, a.llm); err != nil {
 			a.logger.Warn("context compaction failed", "error", err)
 		}
 
-		req := openrouter.ChatRequest{
+		req := bedrock.ChatRequest{
 			Model:     a.cfg.Model,
 			MaxTokens: a.cfg.MaxTokens,
 			Messages:  a.contextMem.Messages(),
 			Tools:     a.registry.Definitions(),
 		}
 
-		resp, err := a.or.Chat(ctx, req)
+		resp, err := a.llm.Chat(ctx, req)
 		if err != nil {
 			span.RecordError(err)
 			return nil, fmt.Errorf("agent llm call failed: %w", err)
@@ -187,11 +187,11 @@ func (a *Agent) Run(ctx context.Context, sessionID, goal string, opts ...RunOpti
 func (a *Agent) executeTools(
 	ctx context.Context,
 	sessionID string,
-	toolCalls []openrouter.ToolCall,
+	toolCalls []bedrock.ToolCall,
 	state *memory.AgentState,
 	toolsUsed map[string]struct{},
-) []openrouter.Message {
-	var results []openrouter.Message
+) []bedrock.Message {
+	var results []bedrock.Message
 	for _, tc := range toolCalls {
 		name := tc.Function.Name
 		toolsUsed[name] = struct{}{}
@@ -200,7 +200,7 @@ func (a *Agent) executeTools(
 		output, err := a.registry.Execute(ctx, name, json.RawMessage(tc.Function.Arguments))
 		if err != nil {
 			a.logger.Error("tool execution failed", "tool", name, "error", err)
-			results = append(results, openrouter.Message{
+			results = append(results, bedrock.Message{
 				Role: "tool", ToolCallID: tc.ID,
 				Content: fmt.Sprintf("error: %s", err.Error()),
 			})
@@ -208,7 +208,7 @@ func (a *Agent) executeTools(
 		}
 
 		_ = a.workingMem.Checkpoint(ctx, sessionID, name, output)
-		results = append(results, openrouter.Message{
+		results = append(results, bedrock.Message{
 			Role: "tool", ToolCallID: tc.ID, Content: output,
 		})
 	}
@@ -251,7 +251,7 @@ func (a *Agent) persistEpisode(ctx context.Context, sessionID, goal string, resu
 	}
 }
 
-func extractText(msg openrouter.Message) string {
+func extractText(msg bedrock.Message) string {
 	switch v := msg.Content.(type) {
 	case string:
 		return v

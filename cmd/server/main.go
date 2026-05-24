@@ -16,10 +16,10 @@ import (
 	"github.com/joho/godotenv"
 	"github.com/redis/go-redis/v9"
 	"github.com/yourorg/agent-service/internal/agent"
+	"github.com/yourorg/agent-service/internal/bedrock"
 	"github.com/yourorg/agent-service/internal/config"
 	"github.com/yourorg/agent-service/internal/mcp"
 	"github.com/yourorg/agent-service/internal/memory"
-	"github.com/yourorg/agent-service/internal/openrouter"
 	"github.com/yourorg/agent-service/internal/tools"
 )
 
@@ -33,11 +33,17 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// ── OpenRouter ────────────────────────────────────────────────────────────
-	orClient := openrouter.New(
-		mustEnv("OPENROUTER_API_KEY"),
-		openrouter.WithAppName("agent-service"),
+	// ── AWS Bedrock ───────────────────────────────────────────────────────────
+	// Usa a default credentials chain do AWS SDK Go v2: env vars, sessões SSO
+	// (aws sso login), ~/.aws/credentials, assume-role, e roles de container/IMDS.
+	llm, err := bedrock.New(ctx,
+		envOrDefault("AWS_REGION", bedrock.DefaultRegion),
+		bedrock.WithAppName("agent-service"),
 	)
+	if err != nil {
+		logger.Error("bedrock init failed", "error", err)
+		os.Exit(1)
+	}
 
 	// ── Dependências externas ─────────────────────────────────────────────────
 	pgPool, err := pgxpool.New(ctx, mustEnv("DATABASE_URL"))
@@ -54,9 +60,9 @@ func main() {
 	defer redisClient.Close()
 
 	// ── Memórias ──────────────────────────────────────────────────────────────
-	embedModel := envOrDefault("EMBED_MODEL", openrouter.DefaultEmbedModel)
+	embedModel := envOrDefault("BEDROCK_EMBED_MODEL", bedrock.DefaultEmbedModel)
 
-	vectorMem := memory.NewVectorMemory(pgPool, orClient, embedModel)
+	vectorMem := memory.NewVectorMemory(pgPool, llm, embedModel)
 	episodicMem := memory.NewEpisodicMemory(pgPool)
 	workingMem := memory.NewWorkingMemory(redisClient, 24*time.Hour)
 	contextMem := memory.NewContextMemory(180_000)
@@ -75,9 +81,9 @@ func main() {
 
 	// Tool de recall semântico
 	registry.Register(&tools.Tool{
-		Definition: openrouter.Tool{
+		Definition: bedrock.Tool{
 			Type: "function",
-			Function: openrouter.ToolFunction{
+			Function: bedrock.ToolFunction{
 				Name:        "recall_memory",
 				Description: "Busca em memórias de longo prazo por relevância semântica",
 				Parameters: map[string]any{
@@ -153,13 +159,13 @@ func main() {
 
 	// ── Agente ────────────────────────────────────────────────────────────────
 	agentCfg := agent.Config{
-		Model:      envOrDefault("AGENT_MODEL", openrouter.DefaultChatModel),
+		Model:      envOrDefault("BEDROCK_MODEL", bedrock.DefaultChatModel),
 		MaxTokens:  4096,
 		MaxIter:    20,
 		BasePrompt: basePrompt,
 	}
 
-	a := agent.New(orClient, agentCfg, registry, contextMem, workingMem, vectorMem, episodicMem, logger)
+	a := agent.New(llm, agentCfg, registry, contextMem, workingMem, vectorMem, episodicMem, logger)
 
 	// ── HTTP Server ───────────────────────────────────────────────────────────
 	mux := http.NewServeMux()

@@ -11,7 +11,7 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"github.com/yourorg/agent-service/internal/openrouter"
+	"github.com/yourorg/agent-service/internal/bedrock"
 	"github.com/yourorg/agent-service/internal/tools"
 )
 
@@ -152,9 +152,9 @@ func (c *Client) AsAgentTools(ctx context.Context) ([]*tools.Tool, error) {
 		def := def
 		client := c
 		agentTools[i] = &tools.Tool{
-			Definition: openrouter.Tool{
+			Definition: bedrock.Tool{
 				Type: "function",
-				Function: openrouter.ToolFunction{
+				Function: bedrock.ToolFunction{
 					Name:        def.Name,
 					Description: def.Description,
 					Parameters: map[string]any{
