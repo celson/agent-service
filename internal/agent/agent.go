@@ -94,26 +94,19 @@ func (a *Agent) Run(ctx context.Context, sessionID, goal string, opts ...RunOpti
 
 	state := a.initializeContext(ctx, sessionID, goal, opts)
 
-	result, toolsUsed, err := a.runLoop(ctx, sessionID, state, span)
+	result, err := a.runLoop(ctx, sessionID, state)
 	if err != nil {
+		span.RecordError(err)
 		return nil, err
 	}
 
-	for t := range toolsUsed {
-		result.ToolsUsed = append(result.ToolsUsed, t)
-	}
 	result.DurationMs = time.Since(start).Milliseconds()
 
 	go a.persistEpisode(context.Background(), sessionID, goal, result)
 	return result, nil
 }
 
-func (a *Agent) runLoop(
-	ctx context.Context,
-	sessionID string,
-	state *memory.AgentState,
-	span trace.Span,
-) (*RunResult, map[string]struct{}, error) {
+func (a *Agent) runLoop(ctx context.Context, sessionID string, state *memory.AgentState) (*RunResult, error) {
 	result := &RunResult{}
 	toolsUsed := map[string]struct{}{}
 
@@ -133,11 +126,10 @@ func (a *Agent) runLoop(
 
 		resp, err := a.llm.Chat(ctx, req)
 		if err != nil {
-			span.RecordError(err)
-			return nil, nil, fmt.Errorf("agent llm call failed: %w", err)
+			return nil, fmt.Errorf("agent llm call failed: %w", err)
 		}
 		if len(resp.Choices) == 0 {
-			return nil, nil, fmt.Errorf("agent: empty response from model")
+			return nil, fmt.Errorf("agent: empty response from model")
 		}
 
 		choice := resp.Choices[0]
@@ -165,10 +157,13 @@ func (a *Agent) runLoop(
 	}
 
 	if result.Output == "" {
-		return nil, nil, ErrMaxIterationsReached
+		return nil, ErrMaxIterationsReached
 	}
 
-	return result, toolsUsed, nil
+	for t := range toolsUsed {
+		result.ToolsUsed = append(result.ToolsUsed, t)
+	}
+	return result, nil
 }
 
 func (a *Agent) initializeContext(ctx context.Context, sessionID, goal string, opts []RunOptions) *memory.AgentState {
