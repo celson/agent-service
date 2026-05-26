@@ -84,17 +84,13 @@ func toAnthropicBody(req ChatRequest) (anthropicBody, error) {
 	for _, m := range req.Messages {
 		switch m.Role {
 		case "system":
-			appendSystemMessage(&body, m)
-
+			body.accumulateSystem(m)
 		case "tool":
-			appendToolMessage(&body, m)
-
+			body.addToolResult(m)
 		case "assistant":
-			appendAssistantMessage(&body, m)
-
+			body.addAssistant(m)
 		case "user":
-			appendUserMessage(&body, m)
-
+			body.addUser(m)
 		default:
 			return anthropicBody{}, fmt.Errorf("bedrock: unsupported role %q", m.Role)
 		}
@@ -111,21 +107,23 @@ func toAnthropicBody(req ChatRequest) (anthropicBody, error) {
 	return body, nil
 }
 
-func appendSystemMessage(body *anthropicBody, m Message) {
-	// Anthropic recebe o system separado, não como mensagem.
-	if s := messageText(m); s != "" {
-		if body.System != "" {
-			body.System += "\n\n"
-		}
-		body.System += s
+// accumulateSystem concatena texto da mensagem system no campo top-level
+// body.System (Anthropic não aceita system como entry em messages).
+func (b *anthropicBody) accumulateSystem(m Message) {
+	s := messageText(m)
+	if s == "" {
+		return
 	}
+	if b.System != "" {
+		b.System += "\n\n"
+	}
+	b.System += s
 }
 
-func appendToolMessage(body *anthropicBody, m Message) {
-	// OpenAI representa resultado de tool como msg role:"tool" com
-	// tool_call_id; Anthropic representa como user turn contendo um
-	// content block "tool_result" referenciando o tool_use_id.
-	body.Messages = append(body.Messages, anthropicMessage{
+// addToolResult converte uma mensagem role:"tool" (formato OpenAI) num user
+// turn contendo um content block tool_result, referenciando o tool_use_id.
+func (b *anthropicBody) addToolResult(m Message) {
+	b.Messages = append(b.Messages, anthropicMessage{
 		Role: "user",
 		Content: []any{anthropicToolResultBlock{
 			Type:      "tool_result",
@@ -135,7 +133,9 @@ func appendToolMessage(body *anthropicBody, m Message) {
 	})
 }
 
-func appendAssistantMessage(body *anthropicBody, m Message) {
+// addAssistant adiciona um assistant turn com text e/ou tool_use blocks. Pula
+// silenciosamente se a mensagem não tem nem texto nem tool_calls.
+func (b *anthropicBody) addAssistant(m Message) {
 	content := []any{}
 	if s := messageText(m); s != "" {
 		content = append(content, anthropicTextBlock{Type: "text", Text: s})
@@ -155,15 +155,16 @@ func appendAssistantMessage(body *anthropicBody, m Message) {
 	if len(content) == 0 {
 		return
 	}
-	body.Messages = append(body.Messages, anthropicMessage{Role: "assistant", Content: content})
+	b.Messages = append(b.Messages, anthropicMessage{Role: "assistant", Content: content})
 }
 
-func appendUserMessage(body *anthropicBody, m Message) {
+// addUser adiciona um user turn com um text block; pula mensagens vazias.
+func (b *anthropicBody) addUser(m Message) {
 	s := messageText(m)
 	if s == "" {
 		return
 	}
-	body.Messages = append(body.Messages, anthropicMessage{
+	b.Messages = append(b.Messages, anthropicMessage{
 		Role:    "user",
 		Content: []any{anthropicTextBlock{Type: "text", Text: s}},
 	})
