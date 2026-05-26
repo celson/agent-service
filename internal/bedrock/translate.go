@@ -84,58 +84,16 @@ func toAnthropicBody(req ChatRequest) (anthropicBody, error) {
 	for _, m := range req.Messages {
 		switch m.Role {
 		case "system":
-			// Anthropic recebe o system separado, não como mensagem.
-			if s := messageText(m); s != "" {
-				if body.System != "" {
-					body.System += "\n\n"
-				}
-				body.System += s
-			}
+			appendSystemMessage(&body, m)
 
 		case "tool":
-			// OpenAI representa resultado de tool como msg role:"tool" com
-			// tool_call_id; Anthropic representa como user turn contendo um
-			// content block "tool_result" referenciando o tool_use_id.
-			body.Messages = append(body.Messages, anthropicMessage{
-				Role: "user",
-				Content: []any{anthropicToolResultBlock{
-					Type:      "tool_result",
-					ToolUseID: m.ToolCallID,
-					Content:   messageText(m),
-				}},
-			})
+			appendToolMessage(&body, m)
 
 		case "assistant":
-			content := []any{}
-			if s := messageText(m); s != "" {
-				content = append(content, anthropicTextBlock{Type: "text", Text: s})
-			}
-			for _, tc := range m.ToolCalls {
-				raw := json.RawMessage(tc.Function.Arguments)
-				if len(raw) == 0 {
-					raw = json.RawMessage("{}")
-				}
-				content = append(content, anthropicToolUseBlock{
-					Type:  "tool_use",
-					ID:    tc.ID,
-					Name:  tc.Function.Name,
-					Input: raw,
-				})
-			}
-			if len(content) == 0 {
-				continue
-			}
-			body.Messages = append(body.Messages, anthropicMessage{Role: "assistant", Content: content})
+			appendAssistantMessage(&body, m)
 
 		case "user":
-			s := messageText(m)
-			if s == "" {
-				continue
-			}
-			body.Messages = append(body.Messages, anthropicMessage{
-				Role:    "user",
-				Content: []any{anthropicTextBlock{Type: "text", Text: s}},
-			})
+			appendUserMessage(&body, m)
 
 		default:
 			return anthropicBody{}, fmt.Errorf("bedrock: unsupported role %q", m.Role)
@@ -151,6 +109,64 @@ func toAnthropicBody(req ChatRequest) (anthropicBody, error) {
 	}
 
 	return body, nil
+}
+
+func appendSystemMessage(body *anthropicBody, m Message) {
+	// Anthropic recebe o system separado, não como mensagem.
+	if s := messageText(m); s != "" {
+		if body.System != "" {
+			body.System += "\n\n"
+		}
+		body.System += s
+	}
+}
+
+func appendToolMessage(body *anthropicBody, m Message) {
+	// OpenAI representa resultado de tool como msg role:"tool" com
+	// tool_call_id; Anthropic representa como user turn contendo um
+	// content block "tool_result" referenciando o tool_use_id.
+	body.Messages = append(body.Messages, anthropicMessage{
+		Role: "user",
+		Content: []any{anthropicToolResultBlock{
+			Type:      "tool_result",
+			ToolUseID: m.ToolCallID,
+			Content:   messageText(m),
+		}},
+	})
+}
+
+func appendAssistantMessage(body *anthropicBody, m Message) {
+	content := []any{}
+	if s := messageText(m); s != "" {
+		content = append(content, anthropicTextBlock{Type: "text", Text: s})
+	}
+	for _, tc := range m.ToolCalls {
+		raw := json.RawMessage(tc.Function.Arguments)
+		if len(raw) == 0 {
+			raw = json.RawMessage("{}")
+		}
+		content = append(content, anthropicToolUseBlock{
+			Type:  "tool_use",
+			ID:    tc.ID,
+			Name:  tc.Function.Name,
+			Input: raw,
+		})
+	}
+	if len(content) == 0 {
+		return
+	}
+	body.Messages = append(body.Messages, anthropicMessage{Role: "assistant", Content: content})
+}
+
+func appendUserMessage(body *anthropicBody, m Message) {
+	s := messageText(m)
+	if s == "" {
+		return
+	}
+	body.Messages = append(body.Messages, anthropicMessage{
+		Role:    "user",
+		Content: []any{anthropicTextBlock{Type: "text", Text: s}},
+	})
 }
 
 // ── Response: Anthropic → OpenAI-like Choice ─────────────────────────────────
