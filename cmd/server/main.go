@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -312,10 +313,14 @@ func buildSREGoal(a alertItem, skill string) string {
 		description = summary
 	}
 
-	labels := ""
+	var labels strings.Builder
 	for k, v := range a.Labels {
 		if k != "alertname" && k != "severity" && k != "service" {
-			labels += fmt.Sprintf("  %s=%s\n", k, v)
+			labels.WriteString("  ")
+			labels.WriteString(k)
+			labels.WriteString("=")
+			labels.WriteString(v)
+			labels.WriteString("\n")
 		}
 	}
 
@@ -327,7 +332,7 @@ Labels adicionais:
 		alertName, severity, a.Status,
 		service, a.StartsAt,
 		description,
-		labels,
+		labels.String(),
 	)
 
 	if skill != "" {
