@@ -111,3 +111,67 @@ func TestExtractContentString(t *testing.T) {
 		})
 	}
 }
+
+func TestFormatForSummary(t *testing.T) {
+	tests := []struct {
+		name     string
+		messages []bedrock.Message
+		expected string
+	}{
+		{
+			name:     "empty messages",
+			messages: []bedrock.Message{},
+			expected: "",
+		},
+		{
+			name: "single string message",
+			messages: []bedrock.Message{
+				{Role: "user", Content: "Hello world"},
+			},
+			expected: "user: Hello world\n",
+		},
+		{
+			name: "multiple string messages",
+			messages: []bedrock.Message{
+				{Role: "user", Content: "Hello"},
+				{Role: "assistant", Content: "Hi there"},
+			},
+			expected: "user: Hello\nassistant: Hi there\n",
+		},
+		{
+			name: "message with []any content structure",
+			messages: []bedrock.Message{
+				{
+					Role: "user",
+					Content: []any{
+						map[string]any{
+							"type": "text",
+							"text": "Extracted text content",
+						},
+						map[string]any{
+							"type": "image",
+							"url":  "http://example.com/image.png",
+						},
+					},
+				},
+			},
+			expected: "user: Extracted text content\n",
+		},
+		{
+			name: "message with unsupported content format",
+			messages: []bedrock.Message{
+				{Role: "system", Content: 12345}, // tipo não suportado
+			},
+			expected: "system: \n",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := formatForSummary(tt.messages)
+			if result != tt.expected {
+				t.Errorf("expected %q, got %q", tt.expected, result)
+			}
+		})
+	}
+}
