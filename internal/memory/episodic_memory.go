@@ -147,11 +147,11 @@ func (e *EpisodicMemory) Stats(ctx context.Context) (map[string]any, error) {
 	}
 
 	return map[string]any{
-		"total":            total,
-		"success":          success,
-		"failure":          failure,
-		"success_rate":     float64(success) / float64(total),
-		"avg_duration_ms":  avgDuration,
+		"total":           total,
+		"success":         success,
+		"failure":         failure,
+		"success_rate":    float64(success) / float64(total),
+		"avg_duration_ms": avgDuration,
 	}, nil
 }
 

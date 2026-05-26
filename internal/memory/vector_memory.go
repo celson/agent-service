@@ -74,7 +74,7 @@ func (v *VectorMemory) Search(ctx context.Context, query string, topK int) ([]st
 	}
 	defer rows.Close()
 
-	var results []string
+	results := make([]string, 0, topK)
 	for rows.Next() {
 		var content string
 		var similarity float64
