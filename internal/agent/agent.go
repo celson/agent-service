@@ -37,25 +37,25 @@ func DefaultConfig() Config {
 }
 
 type Agent struct {
-	llm         *bedrock.Client
+	llm         LLMClient
 	cfg         Config
 	registry    *tools.Registry
 	contextMem  *memory.ContextMemory
-	workingMem  *memory.WorkingMemory
-	vectorMem   *memory.VectorMemory
-	episodicMem *memory.EpisodicMemory
+	workingMem  WorkingMemoryStore
+	vectorMem   VectorMemoryStore
+	episodicMem EpisodicMemoryStore
 	tracer      trace.Tracer
 	logger      *slog.Logger
 }
 
 func New(
-	llm *bedrock.Client,
+	llm LLMClient,
 	cfg Config,
 	registry *tools.Registry,
 	contextMem *memory.ContextMemory,
-	workingMem *memory.WorkingMemory,
-	vectorMem *memory.VectorMemory,
-	episodicMem *memory.EpisodicMemory,
+	workingMem WorkingMemoryStore,
+	vectorMem VectorMemoryStore,
+	episodicMem EpisodicMemoryStore,
 	logger *slog.Logger,
 ) *Agent {
 	return &Agent{
@@ -92,35 +92,21 @@ func (a *Agent) Run(ctx context.Context, sessionID, goal string, opts ...RunOpti
 
 	start := time.Now()
 
-	var systemPrompt string
-	if len(opts) > 0 && opts[0].SystemPrompt != "" {
-		systemPrompt = opts[0].SystemPrompt
-	} else {
-		var err error
-		systemPrompt, err = a.buildSystemPrompt(ctx, goal)
-		if err != nil {
-			a.logger.Warn("failed to build system prompt from memory", "error", err)
-			systemPrompt = a.basePrompt()
-		}
-	}
+	state := a.initializeContext(ctx, sessionID, goal, opts)
 
-	state, err := a.workingMem.Load(ctx, sessionID)
+	result, err := a.runLoop(ctx, sessionID, state)
 	if err != nil {
-		state = &memory.AgentState{Variables: make(map[string]string)}
+		span.RecordError(err)
+		return nil, err
 	}
 
-	a.contextMem.Reset()
-	a.contextMem.SetSystem(systemPrompt)
+	result.DurationMs = time.Since(start).Milliseconds()
 
-	if len(state.CompletedSteps) > 0 {
-		a.contextMem.Add("user", fmt.Sprintf(
-			"[Retomando tarefa]\nObjetivo: %s\nPassos concluídos: %v\nVariáveis: %v",
-			goal, state.CompletedSteps, state.Variables,
-		))
-	} else {
-		a.contextMem.Add("user", goal)
-	}
+	go a.persistEpisode(context.Background(), sessionID, goal, result)
+	return result, nil
+}
 
+func (a *Agent) runLoop(ctx context.Context, sessionID string, state *memory.AgentState) (*RunResult, error) {
 	result := &RunResult{}
 	toolsUsed := map[string]struct{}{}
 
@@ -140,7 +126,6 @@ func (a *Agent) Run(ctx context.Context, sessionID, goal string, opts ...RunOpti
 
 		resp, err := a.llm.Chat(ctx, req)
 		if err != nil {
-			span.RecordError(err)
 			return nil, fmt.Errorf("agent llm call failed: %w", err)
 		}
 		if len(resp.Choices) == 0 {
@@ -178,10 +163,40 @@ func (a *Agent) Run(ctx context.Context, sessionID, goal string, opts ...RunOpti
 	for t := range toolsUsed {
 		result.ToolsUsed = append(result.ToolsUsed, t)
 	}
-	result.DurationMs = time.Since(start).Milliseconds()
-
-	go a.persistEpisode(context.Background(), sessionID, goal, result)
 	return result, nil
+}
+
+func (a *Agent) initializeContext(ctx context.Context, sessionID, goal string, opts []RunOptions) *memory.AgentState {
+	var systemPrompt string
+	if len(opts) > 0 && opts[0].SystemPrompt != "" {
+		systemPrompt = opts[0].SystemPrompt
+	} else {
+		var err error
+		systemPrompt, err = a.buildSystemPrompt(ctx, goal)
+		if err != nil {
+			a.logger.Warn("failed to build system prompt from memory", "error", err)
+			systemPrompt = a.basePrompt()
+		}
+	}
+
+	state, err := a.workingMem.Load(ctx, sessionID)
+	if err != nil {
+		state = &memory.AgentState{Variables: make(map[string]string)}
+	}
+
+	a.contextMem.Reset()
+	a.contextMem.SetSystem(systemPrompt)
+
+	if len(state.CompletedSteps) > 0 {
+		a.contextMem.Add("user", fmt.Sprintf(
+			"[Retomando tarefa]\nObjetivo: %s\nPassos concluídos: %v\nVariáveis: %v",
+			goal, state.CompletedSteps, state.Variables,
+		))
+	} else {
+		a.contextMem.Add("user", goal)
+	}
+
+	return state
 }
 
 func (a *Agent) executeTools(
