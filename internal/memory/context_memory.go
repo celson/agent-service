@@ -52,8 +52,15 @@ func (c *ContextMemory) AddToolResults(results []bedrock.Message) {
 	c.messages = append(c.messages, results...)
 }
 
+// ChatClient é a fatia mínima de *bedrock.Client da qual a compactação depende.
+// Definir como interface aqui permite injetar fakes em testes do pacote agent
+// sem expor o cliente HTTP real.
+type ChatClient interface {
+	Chat(ctx context.Context, req bedrock.ChatRequest) (*bedrock.ChatResponse, error)
+}
+
 // CompactIfNeeded sumariza o histórico quando a janela estiver quase cheia.
-func (c *ContextMemory) CompactIfNeeded(ctx context.Context, llm *bedrock.Client) error {
+func (c *ContextMemory) CompactIfNeeded(ctx context.Context, llm ChatClient) error {
 	estimated := c.estimateTokens()
 	if estimated < int(float64(c.maxTokens)*compactionThreshold) {
 		return nil

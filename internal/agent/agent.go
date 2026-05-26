@@ -37,25 +37,25 @@ func DefaultConfig() Config {
 }
 
 type Agent struct {
-	llm         *bedrock.Client
+	llm         LLMClient
 	cfg         Config
 	registry    *tools.Registry
 	contextMem  *memory.ContextMemory
-	workingMem  *memory.WorkingMemory
-	vectorMem   *memory.VectorMemory
-	episodicMem *memory.EpisodicMemory
+	workingMem  WorkingMemoryStore
+	vectorMem   VectorMemoryStore
+	episodicMem EpisodicMemoryStore
 	tracer      trace.Tracer
 	logger      *slog.Logger
 }
 
 func New(
-	llm *bedrock.Client,
+	llm LLMClient,
 	cfg Config,
 	registry *tools.Registry,
 	contextMem *memory.ContextMemory,
-	workingMem *memory.WorkingMemory,
-	vectorMem *memory.VectorMemory,
-	episodicMem *memory.EpisodicMemory,
+	workingMem WorkingMemoryStore,
+	vectorMem VectorMemoryStore,
+	episodicMem EpisodicMemoryStore,
 	logger *slog.Logger,
 ) *Agent {
 	return &Agent{
