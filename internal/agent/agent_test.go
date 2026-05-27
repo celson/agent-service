@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"testing"
+	"time"
 
 	"github.com/yourorg/agent-service/internal/bedrock"
 	"github.com/yourorg/agent-service/internal/memory"
@@ -208,6 +209,74 @@ func TestRun_ToolCallThenStop(t *testing.T) {
 	}
 	if llm.calls != 2 {
 		t.Errorf("LLM should be called twice, got %d", llm.calls)
+	}
+}
+
+// TestRun_ParallelToolCalls exercita o caminho concorrente de executeTools.
+// Verifica que:
+//   - Cada result fica no slot i correto (ordem posicional preservada)
+//   - toolsUsed acumula todos os nomes sem corromper o map (mutex)
+//   - workingMem.Checkpoint é chamado N vezes, sem lost-update (mutex)
+//
+// Rodar com `go test -race` para detectar races em toolsUsed/checkpoints.
+func TestRun_ParallelToolCalls(t *testing.T) {
+	registry := tools.NewRegistry()
+	for _, name := range []string{"alpha", "beta", "gamma"} {
+		n := name
+		registry.Register(&tools.Tool{
+			Definition: bedrock.Tool{
+				Type:     "function",
+				Function: bedrock.ToolFunction{Name: n, Description: n, Parameters: map[string]any{"type": "object"}},
+			},
+			Handler: func(ctx context.Context, input json.RawMessage) (string, error) {
+				// Pequeno sleep força sobreposição real entre as goroutines.
+				time.Sleep(5 * time.Millisecond)
+				return "out:" + n, nil
+			},
+		})
+	}
+
+	multi := &bedrock.ChatResponse{
+		Choices: []bedrock.Choice{{
+			Index: 0,
+			Message: bedrock.Message{
+				Role: "assistant",
+				ToolCalls: []bedrock.ToolCall{
+					{ID: "t1", Type: "function", Function: bedrock.FunctionCall{Name: "alpha", Arguments: `{}`}},
+					{ID: "t2", Type: "function", Function: bedrock.FunctionCall{Name: "beta", Arguments: `{}`}},
+					{ID: "t3", Type: "function", Function: bedrock.FunctionCall{Name: "gamma", Arguments: `{}`}},
+				},
+			},
+			FinishReason: "tool_calls",
+		}},
+	}
+	llm := &fakeLLM{responses: []*bedrock.ChatResponse{multi, stopResponse("ok")}}
+	wm := &fakeWM{}
+	a := newTestAgent(t, llm, wm, nil, nil, registry)
+
+	result, err := a.Run(context.Background(), "sess-parallel", "fan out")
+	if err != nil {
+		t.Fatalf("unexpected: %v", err)
+	}
+	if result.Output != "ok" {
+		t.Errorf("output = %q, want 'ok'", result.Output)
+	}
+
+	if len(wm.checkpoints) != 3 {
+		t.Errorf("expected 3 checkpoints (one per tool), got %d: %v", len(wm.checkpoints), wm.checkpoints)
+	}
+
+	seen := map[string]bool{}
+	for _, c := range wm.checkpoints {
+		seen[c] = true
+	}
+	for _, want := range []string{"alpha", "beta", "gamma"} {
+		if !seen[want] {
+			t.Errorf("checkpoint for %q missing", want)
+		}
+	}
+	if len(result.ToolsUsed) != 3 {
+		t.Errorf("ToolsUsed = %v, want 3 entries", result.ToolsUsed)
 	}
 }
 

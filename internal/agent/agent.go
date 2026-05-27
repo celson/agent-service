@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/yourorg/agent-service/internal/bedrock"
@@ -207,27 +208,47 @@ func (a *Agent) executeTools(
 	state *memory.AgentState,
 	toolsUsed map[string]struct{},
 ) []bedrock.Message {
-	var results []bedrock.Message
-	for _, tc := range toolCalls {
-		name := tc.Function.Name
-		toolsUsed[name] = struct{}{}
-		a.logger.Info("executing tool", "name", name)
+	results := make([]bedrock.Message, len(toolCalls))
+	var wg sync.WaitGroup
+	// mu protege toolsUsed (map writes) E o Checkpoint, que é um RMW não-atômico
+	// no Redis (Load → mutate → Save). Sem essa serialização, dois Checkpoints
+	// concorrentes na mesma sessão sofrem lost-update: o segundo escreve sobre
+	// CompletedSteps/Iteration baseado num snapshot stale, perdendo o trabalho
+	// do primeiro.
+	var mu sync.Mutex
 
-		output, err := a.registry.Execute(ctx, name, json.RawMessage(tc.Function.Arguments))
-		if err != nil {
-			a.logger.Error("tool execution failed", "tool", name, "error", err)
-			results = append(results, bedrock.Message{
-				Role: "tool", ToolCallID: tc.ID,
-				Content: fmt.Sprintf("error: %s", err.Error()),
-			})
-			continue
-		}
+	wg.Add(len(toolCalls))
+	for i, tc := range toolCalls {
+		go func(i int, tc bedrock.ToolCall) {
+			defer wg.Done()
+			name := tc.Function.Name
 
-		_ = a.workingMem.Checkpoint(ctx, sessionID, name, output)
-		results = append(results, bedrock.Message{
-			Role: "tool", ToolCallID: tc.ID, Content: output,
-		})
+			mu.Lock()
+			toolsUsed[name] = struct{}{}
+			mu.Unlock()
+
+			a.logger.Info("executing tool", "name", name)
+
+			output, err := a.registry.Execute(ctx, name, json.RawMessage(tc.Function.Arguments))
+			if err != nil {
+				a.logger.Error("tool execution failed", "tool", name, "error", err)
+				results[i] = bedrock.Message{
+					Role: "tool", ToolCallID: tc.ID,
+					Content: fmt.Sprintf("error: %s", err.Error()),
+				}
+				return
+			}
+
+			mu.Lock()
+			_ = a.workingMem.Checkpoint(ctx, sessionID, name, output)
+			mu.Unlock()
+
+			results[i] = bedrock.Message{
+				Role: "tool", ToolCallID: tc.ID, Content: output,
+			}
+		}(i, tc)
 	}
+	wg.Wait()
 	return results
 }
 
