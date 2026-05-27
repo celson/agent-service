@@ -221,3 +221,29 @@ func TestMessageText_AllShapes(t *testing.T) {
 		t.Error("[]any shape failed")
 	}
 }
+
+func BenchmarkMessageText_AnySlice(b *testing.B) {
+	var parts []any
+	for i := 0; i < 100; i++ {
+		parts = append(parts, map[string]any{"type": "text", "text": "This is a simple test string to simulate some message content. "})
+	}
+	msg := Message{Content: parts}
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		messageText(msg)
+	}
+}
+
+func BenchmarkMessageText_ContentPartSlice(b *testing.B) {
+	var parts []ContentPart
+	for i := 0; i < 100; i++ {
+		parts = append(parts, ContentPart{Type: "text", Text: "This is a simple test string to simulate some message content. "})
+	}
+	msg := Message{Content: parts}
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		messageText(msg)
+	}
+}
