@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -54,10 +55,16 @@ func main() {
 	}
 	defer pgPool.Close()
 
-	redisClient := redis.NewClient(&redis.Options{
+	redisOpts := &redis.Options{
 		Addr:     mustEnv("REDIS_ADDR"),
 		Password: os.Getenv("REDIS_PASSWORD"),
-	})
+	}
+	if os.Getenv("REDIS_TLS_ENABLED") == "true" {
+		redisOpts.TLSConfig = &tls.Config{
+			MinVersion: tls.VersionTLS12,
+		}
+	}
+	redisClient := redis.NewClient(redisOpts)
 	defer redisClient.Close()
 
 	// ── Memórias ──────────────────────────────────────────────────────────────
