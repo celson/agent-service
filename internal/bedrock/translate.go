@@ -176,14 +176,14 @@ func (b *anthropicBody) addUser(m Message) {
 func fromAnthropicResponse(resp anthropicResponse) ChatResponse {
 	msg := Message{Role: "assistant"}
 
-	var textParts string
+	var textParts strings.Builder
 	for _, b := range resp.Content {
 		switch b.Type {
 		case "text":
-			if textParts != "" {
-				textParts += "\n"
+			if textParts.Len() > 0 {
+				textParts.WriteByte('\n')
 			}
-			textParts += b.Text
+			textParts.WriteString(b.Text)
 		case "tool_use":
 			args := string(b.Input)
 			if args == "" {
@@ -199,7 +199,7 @@ func fromAnthropicResponse(resp anthropicResponse) ChatResponse {
 			})
 		}
 	}
-	msg.Content = textParts
+	msg.Content = textParts.String()
 
 	out := ChatResponse{
 		ID:    resp.ID,
