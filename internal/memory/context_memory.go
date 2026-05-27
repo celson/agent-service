@@ -128,6 +128,12 @@ func extractContentString(msg bedrock.Message) string {
 	switch v := msg.Content.(type) {
 	case string:
 		return v
+	case []bedrock.ContentPart:
+		for _, part := range v {
+			if part.Type == "text" {
+				return part.Text
+			}
+		}
 	case []any:
 		for _, part := range v {
 			if m, ok := part.(map[string]any); ok {

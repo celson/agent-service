@@ -59,6 +59,9 @@ func (w *WorkingMemory) Load(ctx context.Context, sessionID string) (*AgentState
 	if err := json.Unmarshal(data, &state); err != nil {
 		return nil, fmt.Errorf("working_memory: unmarshal failed: %w", err)
 	}
+	if state.Variables == nil {
+		state.Variables = make(map[string]string)
+	}
 	return &state, nil
 }
 
