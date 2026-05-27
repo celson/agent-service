@@ -3,6 +3,7 @@ package bedrock
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 )
 
 // ── Anthropic-on-Bedrock wire types ──────────────────────────────────────────
@@ -241,23 +242,23 @@ func messageText(m Message) string {
 	case string:
 		return v
 	case []ContentPart:
-		var out string
+		var out strings.Builder
 		for _, p := range v {
 			if p.Type == "text" {
-				out += p.Text
+				out.WriteString(p.Text)
 			}
 		}
-		return out
+		return out.String()
 	case []any:
-		var out string
+		var out strings.Builder
 		for _, p := range v {
 			if mp, ok := p.(map[string]any); ok && mp["type"] == "text" {
 				if t, ok := mp["text"].(string); ok {
-					out += t
+					out.WriteString(t)
 				}
 			}
 		}
-		return out
+		return out.String()
 	}
 	return ""
 }

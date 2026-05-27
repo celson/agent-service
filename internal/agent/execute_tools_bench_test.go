@@ -28,8 +28,8 @@ func BenchmarkExecuteTools(b *testing.B) {
 	toolCalls := make([]bedrock.ToolCall, 10)
 	for i := 0; i < 10; i++ {
 		toolCalls[i] = bedrock.ToolCall{
-			ID: "tc-1",
-			Type: "function",
+			ID:       "tc-1",
+			Type:     "function",
 			Function: bedrock.FunctionCall{Name: "slow_tool", Arguments: `{}`},
 		}
 	}
