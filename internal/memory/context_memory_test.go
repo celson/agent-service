@@ -20,6 +20,17 @@ func TestExtractContentString(t *testing.T) {
 			expected: "Hello World",
 		},
 		{
+			// Regressão do PR #29: ContentPart tipado (não []any) precisa ser reconhecido.
+			name: "ContentPart slice returns first text",
+			msg: bedrock.Message{
+				Content: []bedrock.ContentPart{
+					{Type: "text", Text: "first"},
+					{Type: "text", Text: "second"},
+				},
+			},
+			expected: "first",
+		},
+		{
 			name: "Array of Any with Text Type",
 			msg: bedrock.Message{
 				Content: []any{

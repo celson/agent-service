@@ -396,6 +396,22 @@ func TestExtractText_UnknownShapeReturnsEmpty(t *testing.T) {
 	}
 }
 
+// Regressão do fix do PR #29: o tipo []bedrock.ContentPart é o shape
+// estruturado da SDK e antes não era reconhecido — extractText devolvia "" e
+// uma resposta final do agente com content blocks tipados era perdida.
+func TestExtractText_ContentPartShape(t *testing.T) {
+	msg := bedrock.Message{
+		Role: "assistant",
+		Content: []bedrock.ContentPart{
+			{Type: "text", Text: "first text"},
+			{Type: "text", Text: "second ignored"},
+		},
+	}
+	if got := extractText(msg); got != "first text" {
+		t.Errorf("got %q, want 'first text'", got)
+	}
+}
+
 func TestTruncate(t *testing.T) {
 	cases := []struct {
 		in   string
