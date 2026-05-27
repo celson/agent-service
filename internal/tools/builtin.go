@@ -72,18 +72,11 @@ func NewCodeRunnerTool() *Tool {
 }
 
 func runPython(ctx context.Context, code string) (string, error) {
-	// Em produção: substituir por execução em container Docker isolado.
-	// docker run --rm --network none --memory 128m python:3.12-alpine python -c "..."
-	tmpFile, err := os.CreateTemp("", "agent-*.py")
-	if err != nil {
-		return "", err
-	}
-	defer os.Remove(tmpFile.Name())
-	tmpFile.WriteString(code)
-	tmpFile.Close()
-
 	var stdout, stderr bytes.Buffer
-	cmd := exec.CommandContext(ctx, "python3", tmpFile.Name())
+
+	// Execute python code in an isolated Docker container with no network and restricted memory
+	cmd := exec.CommandContext(ctx, "docker", "run", "-i", "--rm", "--network", "none", "--memory", "128m", "python:3.12-alpine", "python", "-")
+	cmd.Stdin = strings.NewReader(code)
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 
 	if err := cmd.Run(); err != nil {
@@ -96,23 +89,19 @@ func runPython(ctx context.Context, code string) (string, error) {
 }
 
 func runGo(ctx context.Context, code string) (string, error) {
-	tmpDir, err := os.MkdirTemp("", "agent-go-*")
-	if err != nil {
-		return "", err
-	}
-	defer os.RemoveAll(tmpDir)
-
-	mainFile := filepath.Join(tmpDir, "main.go")
-	if err := os.WriteFile(mainFile, []byte(code), 0600); err != nil {
-		return "", err
-	}
-
 	var stdout, stderr bytes.Buffer
-	cmd := exec.CommandContext(ctx, "go", "run", mainFile)
+
+	// Create an inline sh script that reads from stdin, writes to main.go, and executes it.
+	// This avoids creating temp files on the host and securely sandboxes the execution.
+	cmd := exec.CommandContext(ctx, "docker", "run", "-i", "--rm", "--network", "none", "--memory", "256m", "golang:1.24-alpine", "sh", "-c", "cat > main.go && go run main.go")
+	cmd.Stdin = strings.NewReader(code)
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 
 	if err := cmd.Run(); err != nil {
-		return "", fmt.Errorf("go error: %s", stderr.String())
+		if stderr.Len() > 0 {
+			return "", fmt.Errorf("go error: %s", stderr.String())
+		}
+		return "", err
 	}
 	return stdout.String(), nil
 }
