@@ -1,8 +1,8 @@
 package agent
 
 import (
-	"testing"
 	"github.com/yourorg/agent-service/internal/memory"
+	"testing"
 )
 
 func BenchmarkBuildPromptWithContext(b *testing.B) {
