@@ -72,18 +72,9 @@ func NewCodeRunnerTool() *Tool {
 }
 
 func runPython(ctx context.Context, code string) (string, error) {
-	// Em produção: substituir por execução em container Docker isolado.
-	// docker run --rm --network none --memory 128m python:3.12-alpine python -c "..."
-	tmpFile, err := os.CreateTemp("", "agent-*.py")
-	if err != nil {
-		return "", err
-	}
-	defer os.Remove(tmpFile.Name())
-	tmpFile.WriteString(code)
-	tmpFile.Close()
-
 	var stdout, stderr bytes.Buffer
-	cmd := exec.CommandContext(ctx, "python3", tmpFile.Name())
+	cmd := exec.CommandContext(ctx, "docker", "run", "--rm", "-i", "--network", "none", "--memory", "128m", "python:3.12-alpine", "python3", "-")
+	cmd.Stdin = strings.NewReader(code)
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 
 	if err := cmd.Run(); err != nil {
@@ -108,7 +99,7 @@ func runGo(ctx context.Context, code string) (string, error) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	cmd := exec.CommandContext(ctx, "go", "run", mainFile)
+	cmd := exec.CommandContext(ctx, "docker", "run", "--rm", "-i", "--network", "none", "--memory", "128m", "-v", fmt.Sprintf("%s:/app", tmpDir), "-w", "/app", "golang:alpine", "go", "run", "main.go")
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 
 	if err := cmd.Run(); err != nil {
