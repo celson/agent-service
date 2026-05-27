@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"strings"
 	"sync"
 	"sync/atomic"
 
@@ -133,13 +134,14 @@ func (c *Client) CallTool(ctx context.Context, name string, args map[string]any)
 	if resp.IsError && len(resp.Content) > 0 {
 		return "", fmt.Errorf("mcp tool error: %s", resp.Content[0].Text)
 	}
-	var out string
+	var out strings.Builder
 	for _, c := range resp.Content {
 		if c.Type == "text" {
-			out += c.Text + "\n"
+			out.WriteString(c.Text)
+			out.WriteByte('\n')
 		}
 	}
-	return out, nil
+	return out.String(), nil
 }
 
 func (c *Client) AsAgentTools(ctx context.Context) ([]*tools.Tool, error) {
