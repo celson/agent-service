@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/yourorg/agent-service/internal/bedrock"
@@ -296,19 +297,23 @@ Você tem acesso a ferramentas para executar código e interagir com sistemas ex
 Sempre planeje antes de agir. Ao concluir uma tarefa, apresente o resultado de forma clara e objetiva.`
 
 func buildPromptWithContext(base string, memories []string, past []memory.Episode) string {
-	prompt := base
+	var builder strings.Builder
+	builder.WriteString(base)
+
 	if len(memories) > 0 {
-		prompt += "\n\n[Conhecimento relevante recuperado da memória]\n"
+		builder.WriteString("\n\n[Conhecimento relevante recuperado da memória]\n")
 		for _, m := range memories {
-			prompt += "- " + m + "\n"
+			builder.WriteString("- ")
+			builder.WriteString(m)
+			builder.WriteString("\n")
 		}
 	}
 	if len(past) > 0 {
-		prompt += "\n\n[Experiências anteriores similares]\n"
+		builder.WriteString("\n\n[Experiências anteriores similares]\n")
 		for _, ep := range past {
-			prompt += fmt.Sprintf("- Objetivo: %s | Resultado: %s | Resumo: %s\n",
+			fmt.Fprintf(&builder, "- Objetivo: %s | Resultado: %s | Resumo: %s\n",
 				ep.Goal, ep.Outcome, ep.Summary)
 		}
 	}
-	return prompt
+	return builder.String()
 }
