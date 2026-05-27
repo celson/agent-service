@@ -80,10 +80,18 @@ func parseFrontmatterUses(front string) []string {
 		if strings.HasPrefix(line, "uses:") {
 			val := strings.TrimSpace(strings.TrimPrefix(line, "uses:"))
 			if val != "" && val != "~" {
-				for _, s := range strings.Split(val, ",") {
-					if name := strings.TrimSpace(s); name != "" {
+				for {
+					cidx := strings.IndexByte(val, ',')
+					if cidx == -1 {
+						if name := strings.TrimSpace(val); name != "" {
+							uses = append(uses, name)
+						}
+						break
+					}
+					if name := strings.TrimSpace(val[:cidx]); name != "" {
 						uses = append(uses, name)
 					}
+					val = val[cidx+1:]
 				}
 				inUsesList = false
 			} else {
