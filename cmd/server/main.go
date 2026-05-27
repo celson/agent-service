@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -110,11 +111,12 @@ func main() {
 			if len(results) == 0 {
 				return "Nenhuma memória relevante encontrada.", nil
 			}
-			out := "Memórias encontradas:\n"
+			var sb strings.Builder
+			sb.WriteString("Memórias encontradas:\n")
 			for i, r := range results {
-				out += fmt.Sprintf("%d. %s\n", i+1, r)
+				fmt.Fprintf(&sb, "%d. %s\n", i+1, r)
 			}
-			return out, nil
+			return sb.String(), nil
 		},
 	})
 
