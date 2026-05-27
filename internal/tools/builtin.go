@@ -5,14 +5,36 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"go/parser"
+	"go/token"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/yourorg/agent-service/internal/bedrock"
 )
+
+var allowedGoImports = map[string]bool{
+	"fmt":             true,
+	"math":            true,
+	"math/rand":       true,
+	"strings":         true,
+	"strconv":         true,
+	"bytes":           true,
+	"time":            true,
+	"sort":            true,
+	"regexp":          true,
+	"unicode":         true,
+	"encoding/json":   true,
+	"encoding/base64": true,
+	"encoding/hex":    true,
+	"crypto/sha256":   true,
+	"crypto/md5":      true,
+	"errors":          true,
+}
 
 // ── Code Runner ───────────────────────────────────────────────────────────────
 
@@ -96,6 +118,22 @@ func runPython(ctx context.Context, code string) (string, error) {
 }
 
 func runGo(ctx context.Context, code string) (string, error) {
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, "", code, parser.ImportsOnly)
+	if err != nil {
+		return "", fmt.Errorf("invalid go code: %w", err)
+	}
+
+	for _, imp := range f.Imports {
+		path, err := strconv.Unquote(imp.Path.Value)
+		if err != nil {
+			continue
+		}
+		if !allowedGoImports[path] {
+			return "", fmt.Errorf("import of %q is not allowed for security reasons", path)
+		}
+	}
+
 	tmpDir, err := os.MkdirTemp("", "agent-go-*")
 	if err != nil {
 		return "", err
