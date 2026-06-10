@@ -211,14 +211,25 @@ func TestMapStopReason(t *testing.T) {
 }
 
 func TestMessageText_AllShapes(t *testing.T) {
-	if messageText(Message{Content: "hi"}) != "hi" {
+	if (Message{Content: "hi"}).Text() != "hi" {
 		t.Error("string shape failed")
 	}
-	if messageText(Message{Content: []ContentPart{{Type: "text", Text: "a"}, {Type: "text", Text: "b"}}}) != "ab" {
-		t.Error("[]ContentPart shape failed")
+	// Blocos múltiplos são concatenados com newline (mesma convenção de
+	// fromAnthropicResponse) para não perder conteúdo de respostas multi-bloco.
+	if got := (Message{Content: []ContentPart{{Type: "text", Text: "a"}, {Type: "text", Text: "b"}}}).Text(); got != "a\nb" {
+		t.Errorf("[]ContentPart shape failed: got %q", got)
 	}
-	if messageText(Message{Content: []any{map[string]any{"type": "text", "text": "c"}}}) != "c" {
+	if (Message{Content: []any{map[string]any{"type": "text", "text": "c"}}}).Text() != "c" {
 		t.Error("[]any shape failed")
+	}
+	if (Message{Content: []any{map[string]any{"type": "image", "url": "x"}}}).Text() != "" {
+		t.Error("non-text block should be ignored")
+	}
+	if (Message{Content: 42}).Text() != "" {
+		t.Error("unknown shape should return empty")
+	}
+	if (Message{Content: nil}).Text() != "" {
+		t.Error("nil content should return empty")
 	}
 }
 
@@ -231,7 +242,7 @@ func BenchmarkMessageText_AnySlice(b *testing.B) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		messageText(msg)
+		msg.Text()
 	}
 }
 
@@ -244,6 +255,6 @@ func BenchmarkMessageText_ContentPartSlice(b *testing.B) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		messageText(msg)
+		msg.Text()
 	}
 }

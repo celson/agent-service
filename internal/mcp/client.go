@@ -1,9 +1,12 @@
+// Package mcp implementa um cliente MCP (Model Context Protocol) que conversa
+// com um servidor externo via stdio usando JSON-RPC 2.0.
 package mcp
 
 import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -11,9 +14,18 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
+)
 
-	"github.com/yourorg/agent-service/internal/bedrock"
-	"github.com/yourorg/agent-service/internal/tools"
+// ErrClosed indica que a conexão com o servidor MCP foi encerrada (processo
+// morreu ou stdout fechou) enquanto havia chamadas pendentes.
+var ErrClosed = errors.New("mcp: connection closed")
+
+const (
+	protocolVersion = "2024-11-05"
+	// initTimeout limita o handshake inicial; um servidor que não responde
+	// ao initialize não pode bloquear o boot do serviço.
+	initTimeout = 30 * time.Second
 )
 
 type Client struct {
@@ -24,6 +36,9 @@ type Client struct {
 	mu      sync.Mutex
 	nextID  atomic.Int64
 	pending map[int64]chan jsonRPCResponse
+	// done é fechado quando o readLoop termina (servidor caiu ou Close);
+	// desbloqueia chamadas pendentes em vez de deixá-las penduradas para sempre.
+	done chan struct{}
 
 	serverName string
 }
@@ -74,20 +89,24 @@ func NewWithEnv(env map[string]string, command string, args ...string) (*Client,
 		stdin:   stdin,
 		stdout:  bufio.NewReader(stdoutPipe),
 		pending: make(map[int64]chan jsonRPCResponse),
+		done:    make(chan struct{}),
 	}
 
 	go c.readLoop()
 
-	if err := c.initialize(); err != nil {
-		cmd.Process.Kill()
+	ctx, cancel := context.WithTimeout(context.Background(), initTimeout)
+	defer cancel()
+	if err := c.initialize(ctx); err != nil {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
 		return nil, fmt.Errorf("mcp: initialize: %w", err)
 	}
 	return c, nil
 }
 
-func (c *Client) initialize() error {
-	result, err := c.call("initialize", map[string]any{
-		"protocolVersion": "2024-11-05",
+func (c *Client) initialize(ctx context.Context) error {
+	result, err := c.call(ctx, "initialize", map[string]any{
+		"protocolVersion": protocolVersion,
 		"clientInfo":      map[string]any{"name": "agent-service", "version": "1.0.0"},
 		"capabilities":    map[string]any{},
 	})
@@ -97,27 +116,33 @@ func (c *Client) initialize() error {
 	var info struct {
 		ServerInfo map[string]any `json:"serverInfo"`
 	}
-	json.Unmarshal(result, &info)
-	if name, ok := info.ServerInfo["name"].(string); ok {
-		c.serverName = name
+	if err := json.Unmarshal(result, &info); err == nil {
+		if name, ok := info.ServerInfo["name"].(string); ok {
+			c.serverName = name
+		}
 	}
 	return c.notify("notifications/initialized", nil)
 }
 
+// ServerName devolve o nome anunciado pelo servidor no handshake (pode ser vazio).
+func (c *Client) ServerName() string { return c.serverName }
+
 func (c *Client) ListTools(ctx context.Context) ([]MCPToolDef, error) {
-	result, err := c.call("tools/list", nil)
+	result, err := c.call(ctx, "tools/list", nil)
 	if err != nil {
 		return nil, err
 	}
 	var resp struct {
 		Tools []MCPToolDef `json:"tools"`
 	}
-	json.Unmarshal(result, &resp)
+	if err := json.Unmarshal(result, &resp); err != nil {
+		return nil, fmt.Errorf("mcp: parse tools/list: %w", err)
+	}
 	return resp.Tools, nil
 }
 
 func (c *Client) CallTool(ctx context.Context, name string, args map[string]any) (string, error) {
-	result, err := c.call("tools/call", map[string]any{
+	result, err := c.call(ctx, "tools/call", map[string]any{
 		"name": name, "arguments": args,
 	})
 	if err != nil {
@@ -130,7 +155,9 @@ func (c *Client) CallTool(ctx context.Context, name string, args map[string]any)
 		} `json:"content"`
 		IsError bool `json:"isError"`
 	}
-	json.Unmarshal(result, &resp)
+	if err := json.Unmarshal(result, &resp); err != nil {
+		return "", fmt.Errorf("mcp: parse tools/call result: %w", err)
+	}
 	if resp.IsError && len(resp.Content) > 0 {
 		return "", fmt.Errorf("mcp tool error: %s", resp.Content[0].Text)
 	}
@@ -144,44 +171,14 @@ func (c *Client) CallTool(ctx context.Context, name string, args map[string]any)
 	return out.String(), nil
 }
 
-func (c *Client) AsAgentTools(ctx context.Context) ([]*tools.Tool, error) {
-	defs, err := c.ListTools(ctx)
-	if err != nil {
-		return nil, err
-	}
-	agentTools := make([]*tools.Tool, len(defs))
-	for i, def := range defs {
-		def := def
-		client := c
-		agentTools[i] = &tools.Tool{
-			Definition: bedrock.Tool{
-				Type: "function",
-				Function: bedrock.ToolFunction{
-					Name:        def.Name,
-					Description: def.Description,
-					Parameters: map[string]any{
-						"type":       def.InputSchema.Type,
-						"properties": def.InputSchema.Properties,
-						"required":   def.InputSchema.Required,
-					},
-				},
-			},
-			Handler: func(ctx context.Context, input json.RawMessage) (string, error) {
-				var args map[string]any
-				json.Unmarshal(input, &args)
-				return client.CallTool(ctx, def.Name, args)
-			},
-		}
-	}
-	return agentTools, nil
-}
-
 func (c *Client) Close() error {
-	c.stdin.Close()
+	_ = c.stdin.Close()
 	return c.cmd.Wait()
 }
 
-func (c *Client) call(method string, params any) (json.RawMessage, error) {
+// call envia uma requisição JSON-RPC e espera a resposta correspondente.
+// Desbloqueia se ctx for cancelado ou se a conexão com o servidor cair.
+func (c *Client) call(ctx context.Context, method string, params any) (json.RawMessage, error) {
 	id := c.nextID.Add(1)
 	ch := make(chan jsonRPCResponse, 1)
 
@@ -189,19 +186,31 @@ func (c *Client) call(method string, params any) (json.RawMessage, error) {
 	c.pending[id] = ch
 	c.mu.Unlock()
 
-	req := jsonRPCRequest{JSONRPC: "2.0", ID: id, Method: method, Params: params}
-	if err := json.NewEncoder(c.stdin).Encode(req); err != nil {
+	removePending := func() {
 		c.mu.Lock()
 		delete(c.pending, id)
 		c.mu.Unlock()
+	}
+
+	req := jsonRPCRequest{JSONRPC: "2.0", ID: id, Method: method, Params: params}
+	if err := json.NewEncoder(c.stdin).Encode(req); err != nil {
+		removePending()
 		return nil, fmt.Errorf("mcp: send: %w", err)
 	}
 
-	resp := <-ch
-	if resp.Error != nil {
-		return nil, fmt.Errorf("mcp error %d: %s", resp.Error.Code, resp.Error.Message)
+	select {
+	case resp := <-ch:
+		if resp.Error != nil {
+			return nil, fmt.Errorf("mcp error %d: %s", resp.Error.Code, resp.Error.Message)
+		}
+		return resp.Result, nil
+	case <-ctx.Done():
+		removePending()
+		return nil, fmt.Errorf("mcp: %s: %w", method, ctx.Err())
+	case <-c.done:
+		removePending()
+		return nil, fmt.Errorf("mcp: %s: %w", method, ErrClosed)
 	}
-	return resp.Result, nil
 }
 
 func (c *Client) notify(method string, params any) error {
@@ -213,6 +222,10 @@ func (c *Client) notify(method string, params any) error {
 }
 
 func (c *Client) readLoop() {
+	// Ao sair (EOF/erro de decode), fecha done para liberar todos os calls
+	// bloqueados — sem isso, um servidor que morre deixa goroutines penduradas.
+	defer close(c.done)
+
 	decoder := json.NewDecoder(c.stdout)
 	for {
 		var resp jsonRPCResponse
@@ -220,6 +233,7 @@ func (c *Client) readLoop() {
 			return
 		}
 		if resp.ID == 0 {
+			// Notificação ou request do servidor; este cliente não os trata.
 			continue
 		}
 		c.mu.Lock()

@@ -94,9 +94,11 @@ func (e *EpisodicMemory) FindSimilar(ctx context.Context, goal string, limit int
 			&ep.ID, &ep.SessionID, &ep.Goal, &ep.Outcome,
 			&ep.Summary, &toolsRaw, &ep.DurationMs, &ep.CreatedAt,
 		); err != nil {
-			continue
+			return nil, fmt.Errorf("episodic_memory: scan: %w", err)
 		}
-		json.Unmarshal(toolsRaw, &ep.ToolsUsed)
+		if err := json.Unmarshal(toolsRaw, &ep.ToolsUsed); err != nil {
+			ep.ToolsUsed = nil
+		}
 		episodes = append(episodes, ep)
 	}
 
@@ -120,12 +122,17 @@ func (e *EpisodicMemory) GetBySession(ctx context.Context, sessionID string) ([]
 	for rows.Next() {
 		var ep Episode
 		var toolsRaw []byte
-		rows.Scan(&ep.ID, &ep.Goal, &ep.Outcome, &ep.Summary, &toolsRaw, &ep.DurationMs, &ep.CreatedAt)
-		json.Unmarshal(toolsRaw, &ep.ToolsUsed)
+		if err := rows.Scan(&ep.ID, &ep.Goal, &ep.Outcome, &ep.Summary, &toolsRaw, &ep.DurationMs, &ep.CreatedAt); err != nil {
+			return nil, fmt.Errorf("episodic_memory: scan: %w", err)
+		}
+		if err := json.Unmarshal(toolsRaw, &ep.ToolsUsed); err != nil {
+			ep.ToolsUsed = nil
+		}
+		ep.SessionID = sessionID
 		episodes = append(episodes, ep)
 	}
 
-	return episodes, nil
+	return episodes, rows.Err()
 }
 
 // Stats retorna métricas agregadas sobre as execuções.
@@ -133,24 +140,31 @@ func (e *EpisodicMemory) Stats(ctx context.Context) (map[string]any, error) {
 	var total, success, failure int
 	var avgDuration float64
 
+	// COALESCE: AVG devolve NULL com a tabela vazia, o que quebraria o Scan.
 	err := e.db.QueryRow(ctx, `
 		SELECT
 			COUNT(*),
 			COUNT(*) FILTER (WHERE outcome = 'success'),
 			COUNT(*) FILTER (WHERE outcome = 'failure'),
-			AVG(duration_ms)
+			COALESCE(AVG(duration_ms), 0)
 		FROM episodes
 	`).Scan(&total, &success, &failure, &avgDuration)
 
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("episodic_memory: stats failed: %w", err)
+	}
+
+	// Sem o guard, 0/0 produz NaN — que o encoding/json não serializa.
+	successRate := 0.0
+	if total > 0 {
+		successRate = float64(success) / float64(total)
 	}
 
 	return map[string]any{
 		"total":           total,
 		"success":         success,
 		"failure":         failure,
-		"success_rate":    float64(success) / float64(total),
+		"success_rate":    successRate,
 		"avg_duration_ms": avgDuration,
 	}, nil
 }
