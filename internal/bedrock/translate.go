@@ -111,7 +111,7 @@ func toAnthropicBody(req ChatRequest) (anthropicBody, error) {
 // accumulateSystem concatena texto da mensagem system no campo top-level
 // body.System (Anthropic não aceita system como entry em messages).
 func (b *anthropicBody) accumulateSystem(m Message) {
-	s := messageText(m)
+	s := m.Text()
 	if s == "" {
 		return
 	}
@@ -129,7 +129,7 @@ func (b *anthropicBody) addToolResult(m Message) {
 		Content: []any{anthropicToolResultBlock{
 			Type:      "tool_result",
 			ToolUseID: m.ToolCallID,
-			Content:   messageText(m),
+			Content:   m.Text(),
 		}},
 	})
 }
@@ -138,7 +138,7 @@ func (b *anthropicBody) addToolResult(m Message) {
 // silenciosamente se a mensagem não tem nem texto nem tool_calls.
 func (b *anthropicBody) addAssistant(m Message) {
 	content := []any{}
-	if s := messageText(m); s != "" {
+	if s := m.Text(); s != "" {
 		content = append(content, anthropicTextBlock{Type: "text", Text: s})
 	}
 	for _, tc := range m.ToolCalls {
@@ -161,7 +161,7 @@ func (b *anthropicBody) addAssistant(m Message) {
 
 // addUser adiciona um user turn com um text block; pula mensagens vazias.
 func (b *anthropicBody) addUser(m Message) {
-	s := messageText(m)
+	s := m.Text()
 	if s == "" {
 		return
 	}
@@ -233,32 +233,4 @@ func mapStopReason(s string) string {
 	default:
 		return s
 	}
-}
-
-// messageText extrai o texto plano de um Message.Content (string ou
-// []ContentPart ou []any).
-func messageText(m Message) string {
-	switch v := m.Content.(type) {
-	case string:
-		return v
-	case []ContentPart:
-		var out strings.Builder
-		for _, p := range v {
-			if p.Type == "text" {
-				out.WriteString(p.Text)
-			}
-		}
-		return out.String()
-	case []any:
-		var out strings.Builder
-		for _, p := range v {
-			if mp, ok := p.(map[string]any); ok && mp["type"] == "text" {
-				if t, ok := mp["text"].(string); ok {
-					out.WriteString(t)
-				}
-			}
-		}
-		return out.String()
-	}
-	return ""
 }

@@ -36,7 +36,7 @@ The package `internal/bedrock/` exposes an OpenAI-style API surface (`Message`, 
 
 ### Agent reasoning loop (`internal/agent/agent.go`)
 
-Iterates up to `MaxIter` (default 20) times: sends messages + tool definitions to Bedrock (`InvokeModel` with Anthropic body), receives `tool_calls` or a final `stop`, dispatches tool calls through the registry, checkpoints progress in WorkingMemory, compacts context when needed. Returns on `finish_reason == "stop"` or `ErrMaxIterationsReached`.
+Iterates up to `MaxIter` (default 20) times: sends messages + tool definitions to Bedrock (`InvokeModel` with Anthropic body), receives `tool_calls` or a final `stop`, dispatches tool calls through the registry, checkpoints progress in WorkingMemory, compacts context when needed. Returns on `finish_reason == "stop"` or `ErrMaxIterationsReached`. `Agent.Run` is safe for concurrent calls — each run gets its own `ContextMemory`. Episode persistence is async; `Agent.Drain()` is called on shutdown to flush pending writes.
 
 ### Memory system (`internal/memory/`)
 
@@ -44,7 +44,7 @@ Four independent layers composed in the agent:
 
 | Type | Backing store | Purpose |
 |------|--------------|---------|
-| `ContextMemory` | in-process slice | Active message window; auto-compacts at 80% of `maxTokens` (default 180k) using claude-haiku as summarizer |
+| `ContextMemory` | in-process slice | Per-run message window; auto-compacts at 80% of `maxTokens` (default 180k) using claude-haiku as summarizer; the compaction split never orphans a `tool_result` from its `tool_use` |
 | `WorkingMemory` | Redis | Session state (`AgentState`) — goal, plan, completed steps, variables; enables resumption after crash |
 | `VectorMemory` | Postgres + pgvector | Semantic recall via cosine similarity (HNSW index, threshold 0.75, topK 5); embeddings via Bedrock Titan v2 (1024 dims) |
 | `EpisodicMemory` | Postgres | Full run history with FTS on goals; used to build system prompt from past relevant runs |
@@ -69,6 +69,9 @@ Spawns an external MCP server as a subprocess, communicates over stdio using JSO
 | `REDIS_ADDR` | `localhost:6379` | WorkingMemory backing store |
 | `FILES_BASE_DIR` | `./files` | Sandbox for file_ops tool |
 | `PORT` | `8080` | HTTP listen port |
+| `AGENT_MAX_ITER` | `20` | Max reasoning-loop iterations per run |
+| `AGENT_MAX_TOKENS` | `4096` | Max output tokens per LLM call |
+| `AGENT_MAX_CONTEXT_TOKENS` | `180000` | Context window budget before compaction |
 | `GITHUB_TOKEN` | — | Optional; enables MCP GitHub tools |
 | `OTEL_EXPORTER_JAEGER_ENDPOINT` | — | OpenTelemetry traces to Jaeger |
 
@@ -82,4 +85,4 @@ Before running, ensure AWS credentials are available: `aws sso login` (recommend
 
 ## Database schema
 
-`VectorMemory.CreateSchema()` and `EpisodicMemory.CreateSchema()` are called at startup — no separate migration tool. The Postgres image is `pgvector/pgvector:pg16`, which ships the `vector` extension.
+`VectorMemory.CreateSchema()` and `EpisodicMemory.CreateSchema()` are called at startup — no separate migration tool. Both are idempotent; the `memories` table is only dropped/recreated if the stored embedding dimension differs from the configured model (1024 for Titan v2). The Postgres image is `pgvector/pgvector:pg16`, which ships the `vector` extension.

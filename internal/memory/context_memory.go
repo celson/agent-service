@@ -11,9 +11,13 @@ import (
 const (
 	compactionThreshold = 0.80
 	defaultMaxTokens    = 180_000
+	// preserveRecentN é o número mínimo de mensagens recentes mantidas
+	// intactas após uma compactação.
+	preserveRecentN = 4
 )
 
 // ContextMemory gerencia a janela de tokens ativa da conversa.
+// Não é seguro para uso concorrente: crie uma instância por execução.
 type ContextMemory struct {
 	system    string
 	messages  []bedrock.Message
@@ -21,7 +25,7 @@ type ContextMemory struct {
 }
 
 func NewContextMemory(maxTokens int) *ContextMemory {
-	if maxTokens == 0 {
+	if maxTokens <= 0 {
 		maxTokens = defaultMaxTokens
 	}
 	return &ContextMemory{maxTokens: maxTokens}
@@ -66,13 +70,13 @@ func (c *ContextMemory) CompactIfNeeded(ctx context.Context, llm ChatClient) err
 		return nil
 	}
 
-	preserveN := 4
-	if len(c.messages) <= preserveN {
+	split := c.compactionSplit()
+	if split <= 0 {
 		return nil
 	}
 
-	toSummarize := c.messages[:len(c.messages)-preserveN]
-	recent := c.messages[len(c.messages)-preserveN:]
+	toSummarize := c.messages[:split]
+	recent := c.messages[split:]
 
 	resp, err := llm.Chat(ctx, bedrock.ChatRequest{
 		Model:     bedrock.DefaultHaikuModel, // modelo leve para sumarizar
@@ -89,26 +93,37 @@ func (c *ContextMemory) CompactIfNeeded(ctx context.Context, llm ChatClient) err
 		return fmt.Errorf("context compaction: empty response")
 	}
 
-	summary := extractContentString(resp.Choices[0].Message)
+	summary := resp.Choices[0].Message.Text()
 
-	c.messages = []bedrock.Message{
-		{Role: "user", Content: "[Resumo da conversa anterior]\n" + summary},
-		{Role: "assistant", Content: "Entendido. Continuo a partir deste contexto."},
-	}
-	c.messages = append(c.messages, recent...)
+	compacted := make([]bedrock.Message, 0, len(recent)+2)
+	compacted = append(compacted,
+		bedrock.Message{Role: "user", Content: "[Resumo da conversa anterior]\n" + summary},
+		bedrock.Message{Role: "assistant", Content: "Entendido. Continuo a partir deste contexto."},
+	)
+	c.messages = append(compacted, recent...)
 	return nil
+}
+
+// compactionSplit devolve o índice onde o histórico é cortado: tudo antes é
+// sumarizado, tudo a partir dele é preservado. O corte recua enquanto a
+// primeira mensagem preservada for um tool result — separá-la do assistant
+// turn que contém o tool_use correspondente produziria uma conversa inválida
+// para a API Anthropic (tool_result órfão).
+func (c *ContextMemory) compactionSplit() int {
+	split := len(c.messages) - preserveRecentN
+	for split > 0 && c.messages[split].Role == "tool" {
+		split--
+	}
+	return split
 }
 
 func (c *ContextMemory) estimateTokens() int {
 	total := len(c.system) / 4
 	for _, msg := range c.messages {
-		switch v := msg.Content.(type) {
-		case string:
-			total += len(v) / 4
-		case []bedrock.ContentPart:
-			for _, p := range v {
-				total += len(p.Text) / 4
-			}
+		total += len(msg.Text()) / 4
+		// Tool calls também ocupam janela: nome + argumentos JSON.
+		for _, tc := range msg.ToolCalls {
+			total += (len(tc.Function.Name) + len(tc.Function.Arguments)) / 4
 		}
 	}
 	return total
@@ -118,32 +133,11 @@ func formatForSummary(messages []bedrock.Message) string {
 	var sb strings.Builder
 	for _, msg := range messages {
 		sb.WriteString(msg.Role + ": ")
-		sb.WriteString(extractContentString(msg))
+		sb.WriteString(msg.Text())
+		for _, tc := range msg.ToolCalls {
+			fmt.Fprintf(&sb, "[tool_call %s(%s)]", tc.Function.Name, tc.Function.Arguments)
+		}
 		sb.WriteString("\n")
 	}
 	return sb.String()
-}
-
-func extractContentString(msg bedrock.Message) string {
-	switch v := msg.Content.(type) {
-	case string:
-		return v
-	case []bedrock.ContentPart:
-		for _, part := range v {
-			if part.Type == "text" {
-				return part.Text
-			}
-		}
-	case []any:
-		for _, part := range v {
-			if m, ok := part.(map[string]any); ok {
-				if m["type"] == "text" {
-					if t, ok := m["text"].(string); ok {
-						return t
-					}
-				}
-			}
-		}
-	}
-	return ""
 }

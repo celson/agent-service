@@ -6,6 +6,8 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -59,7 +61,7 @@ func (f *fakeWM) Checkpoint(ctx context.Context, sessionID, step, result string)
 
 type fakeVM struct {
 	searchErr error
-	stored    int
+	stored    atomic.Int64
 }
 
 func (f *fakeVM) Search(ctx context.Context, query string, topK int) ([]string, error) {
@@ -67,15 +69,18 @@ func (f *fakeVM) Search(ctx context.Context, query string, topK int) ([]string, 
 }
 
 func (f *fakeVM) Store(ctx context.Context, content string, metadata map[string]any) error {
-	f.stored++
+	f.stored.Add(1)
 	return nil
 }
 
 type fakeEM struct {
-	recorded int
+	recorded atomic.Int64
 }
 
-func (f *fakeEM) Record(ctx context.Context, ep memory.Episode) error { f.recorded++; return nil }
+func (f *fakeEM) Record(ctx context.Context, ep memory.Episode) error {
+	f.recorded.Add(1)
+	return nil
+}
 func (f *fakeEM) FindSimilar(ctx context.Context, goal string, limit int) ([]memory.Episode, error) {
 	return nil, nil
 }
@@ -102,7 +107,7 @@ func newTestAgent(t *testing.T, llm LLMClient, wm WorkingMemoryStore, vm VectorM
 		registry = tools.NewRegistry()
 	}
 	cfg := Config{Model: "test-model", MaxTokens: 1024, MaxIter: 3}
-	return New(llm, cfg, registry, memory.NewContextMemory(180_000), wm, vm, em, silentLogger())
+	return New(llm, cfg, registry, wm, vm, em, silentLogger())
 }
 
 // ── Helpers para construir respostas ─────────────────────────────────────────
@@ -369,48 +374,64 @@ func TestRun_ResumedSessionInjectsCompletedSteps(t *testing.T) {
 	}
 }
 
+// TestRun_ConcurrentRunsAreIsolated garante que execuções simultâneas não
+// compartilham janela de contexto (regressão: o ContextMemory era um campo do
+// Agent e Run chamava Reset(), corrompendo conversas concorrentes). Rodar com
+// `go test -race`.
+func TestRun_ConcurrentRunsAreIsolated(t *testing.T) {
+	const n = 8
+	llm := &concurrentFakeLLM{response: stopResponse("ok")}
+	a := newTestAgent(t, llm, nil, nil, nil, nil)
+
+	var wg sync.WaitGroup
+	errs := make([]error, n)
+	wg.Add(n)
+	for i := 0; i < n; i++ {
+		go func(i int) {
+			defer wg.Done()
+			_, errs[i] = a.Run(context.Background(), "sess-conc", "goal")
+		}(i)
+	}
+	wg.Wait()
+	a.Drain()
+
+	for i, err := range errs {
+		if err != nil {
+			t.Errorf("run %d failed: %v", i, err)
+		}
+	}
+}
+
+// concurrentFakeLLM valida que cada request chega bem-formado (system + user)
+// mesmo sob concorrência, e devolve sempre a mesma resposta.
+type concurrentFakeLLM struct {
+	response *bedrock.ChatResponse
+}
+
+func (f *concurrentFakeLLM) Chat(ctx context.Context, req bedrock.ChatRequest) (*bedrock.ChatResponse, error) {
+	if len(req.Messages) == 0 {
+		return nil, errors.New("empty messages")
+	}
+	return f.response, nil
+}
+
+func TestRun_CancelledContextStopsLoop(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	llm := &fakeLLM{responses: []*bedrock.ChatResponse{stopResponse("never")}}
+	a := newTestAgent(t, llm, nil, nil, nil, nil)
+
+	_, err := a.Run(ctx, "sess-cancel", "anything")
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context.Canceled, got %v", err)
+	}
+	if llm.calls != 0 {
+		t.Errorf("LLM should not be called after cancellation, got %d calls", llm.calls)
+	}
+}
+
 // ── Pure helper tests ───────────────────────────────────────────────────────
-
-func TestExtractText_StringContent(t *testing.T) {
-	got := extractText(bedrock.Message{Role: "assistant", Content: "plain"})
-	if got != "plain" {
-		t.Errorf("got %q, want 'plain'", got)
-	}
-}
-
-func TestExtractText_AnyContentWithTextBlock(t *testing.T) {
-	msg := bedrock.Message{
-		Role: "assistant",
-		Content: []any{
-			map[string]any{"type": "text", "text": "block-text"},
-		},
-	}
-	if got := extractText(msg); got != "block-text" {
-		t.Errorf("got %q, want 'block-text'", got)
-	}
-}
-
-func TestExtractText_UnknownShapeReturnsEmpty(t *testing.T) {
-	if got := extractText(bedrock.Message{Content: 42}); got != "" {
-		t.Errorf("got %q, want empty", got)
-	}
-}
-
-// Regressão do fix do PR #29: o tipo []bedrock.ContentPart é o shape
-// estruturado da SDK e antes não era reconhecido — extractText devolvia "" e
-// uma resposta final do agente com content blocks tipados era perdida.
-func TestExtractText_ContentPartShape(t *testing.T) {
-	msg := bedrock.Message{
-		Role: "assistant",
-		Content: []bedrock.ContentPart{
-			{Type: "text", Text: "first text"},
-			{Type: "text", Text: "second ignored"},
-		},
-	}
-	if got := extractText(msg); got != "first text" {
-		t.Errorf("got %q, want 'first text'", got)
-	}
-}
 
 func TestTruncate(t *testing.T) {
 	cases := []struct {
@@ -421,6 +442,8 @@ func TestTruncate(t *testing.T) {
 		{"short", 10, "short"},
 		{"exactly10!", 10, "exactly10!"},
 		{"abcdefghij", 5, "abcde..."},
+		// não pode partir runa multi-byte no meio ("ção" tem ç=2 bytes)
+		{"ação", 2, "a..."},
 	}
 	for _, c := range cases {
 		if got := truncate(c.in, c.n); got != c.want {

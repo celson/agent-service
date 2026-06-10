@@ -16,14 +16,20 @@ const (
 	defaultSimilarityThresh = 0.75
 )
 
+// Embedder é a fatia mínima de *bedrock.Client usada para gerar embeddings.
+// Como interface, permite fakes em testes sem tocar o AWS SDK.
+type Embedder interface {
+	EmbedOne(ctx context.Context, model, text string) ([]float32, error)
+}
+
 // VectorMemory persiste e busca memórias por similaridade semântica via pgvector.
 type VectorMemory struct {
 	db         *pgxpool.Pool
-	llm        *bedrock.Client
+	llm        Embedder
 	embedModel string
 }
 
-func NewVectorMemory(db *pgxpool.Pool, llm *bedrock.Client, embedModel string) *VectorMemory {
+func NewVectorMemory(db *pgxpool.Pool, llm Embedder, embedModel string) *VectorMemory {
 	if embedModel == "" {
 		embedModel = bedrock.DefaultEmbedModel
 	}
@@ -46,7 +52,10 @@ func (v *VectorMemory) Store(ctx context.Context, content string, metadata map[s
 	if err != nil {
 		return fmt.Errorf("vector_memory: embed failed: %w", err)
 	}
-	metaJSON, _ := json.Marshal(metadata)
+	metaJSON, err := json.Marshal(metadata)
+	if err != nil {
+		return fmt.Errorf("vector_memory: marshal metadata: %w", err)
+	}
 	_, err = v.db.Exec(ctx, `
 		INSERT INTO memories (content, embedding, metadata)
 		VALUES ($1, $2, $3)
@@ -79,30 +88,48 @@ func (v *VectorMemory) Search(ctx context.Context, query string, topK int) ([]st
 		var content string
 		var similarity float64
 		if err := rows.Scan(&content, &similarity); err != nil {
-			continue
+			return nil, fmt.Errorf("vector_memory: scan: %w", err)
 		}
 		results = append(results, content)
 	}
 	return results, rows.Err()
 }
 
-// CreateSchema (re)cria a tabela de memórias vetoriais. A dimensão mudou de
-// 1536 (OpenAI text-embedding-3-small) para 1024 (Amazon Titan embed v2),
-// então dropamos a tabela antiga — vetores anteriores não são compatíveis.
-// EpisodicMemory preserva o histórico de runs.
+// embeddingDims é a dimensão do Amazon Titan embed v2. Se a tabela existente
+// tiver outra dimensão (ex.: 1536 do antigo OpenAI text-embedding-3-small),
+// ela é recriada — vetores de modelos diferentes não são comparáveis.
+const embeddingDims = 1024
+
+// CreateSchema cria a tabela de memórias vetoriais de forma idempotente:
+// só dropa a tabela existente se a dimensão do embedding for incompatível.
 func (v *VectorMemory) CreateSchema(ctx context.Context) error {
-	_, err := v.db.Exec(ctx, `
-		CREATE EXTENSION IF NOT EXISTS vector;
-		DROP TABLE IF EXISTS memories;
-		CREATE TABLE memories (
+	if _, err := v.db.Exec(ctx, `CREATE EXTENSION IF NOT EXISTS vector`); err != nil {
+		return fmt.Errorf("vector_memory: create extension: %w", err)
+	}
+
+	var existingDims *int
+	err := v.db.QueryRow(ctx, `
+		SELECT atttypmod
+		FROM pg_attribute
+		WHERE attrelid = to_regclass('memories') AND attname = 'embedding'
+	`).Scan(&existingDims)
+	if err == nil && existingDims != nil && *existingDims != embeddingDims {
+		if _, err := v.db.Exec(ctx, `DROP TABLE memories`); err != nil {
+			return fmt.Errorf("vector_memory: drop incompatible table (dims %d != %d): %w",
+				*existingDims, embeddingDims, err)
+		}
+	}
+
+	_, err = v.db.Exec(ctx, fmt.Sprintf(`
+		CREATE TABLE IF NOT EXISTS memories (
 			id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
 			content    TEXT NOT NULL,
-			embedding  VECTOR(1024),
+			embedding  VECTOR(%d),
 			metadata   JSONB DEFAULT '{}',
 			created_at TIMESTAMPTZ DEFAULT NOW()
 		);
 		CREATE INDEX IF NOT EXISTS memories_embedding_idx
 			ON memories USING hnsw (embedding vector_cosine_ops);
-	`)
+	`, embeddingDims))
 	return err
 }
